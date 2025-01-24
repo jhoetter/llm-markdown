@@ -1,5 +1,6 @@
 import re
 import inspect
+import json
 from typing import get_type_hints, List, Dict, Any
 from pydantic import BaseModel
 import logging
@@ -11,20 +12,33 @@ class llm:
     def __init__(self, provider, reasoning_first: bool = True):
         self.provider = provider
         self.reasoning_first = reasoning_first
-        self.system_instructions = (
-            """You are a helpful assistant."""
-            if not reasoning_first
-            else """
-        You are a helpful assistant. Always structure your output as follows:
-        <reasoning>
-        Provide the reasoning behind your answer.
-        </reasoning>
-        <answer>
-        Provide the final answer only, formatted as required.
-        </answer>
-        Always start with the reasoning first. Ensure that both reasoning and answer are complete, i.e. have both opening and closing tags.
-        """
-        )
+        self.base_system_instructions = "You are a helpful assistant."
+
+    def get_system_instructions(self, return_type) -> str:
+        """Generate appropriate system instructions based on return type."""
+        if return_type and issubclass(return_type, BaseModel):
+            if self.reasoning_first:
+                return """You are a helpful assistant that always returns JSON output for Pydantic models.
+When responding, use the following structure:
+<reasoning>
+Explain the thought process (if necessary).
+</reasoning>
+<answer>
+A valid JSON object matching the required fields exactly.
+</answer>"""
+            else:
+                return """You are a helpful assistant that always returns JSON output for Pydantic models.
+Your entire response must be a single valid JSON object matching the required fields exactly, with no additional text or explanation."""
+        else:
+            return self.base_system_instructions if not self.reasoning_first else """
+You are a helpful assistant. Always structure your output as follows:
+<reasoning>
+Provide the reasoning behind your answer.
+</reasoning>
+<answer>
+Provide the final answer only, formatted as required.
+</answer>
+"""
 
     def parse_content(self, text: str, template_vars: dict) -> List[Dict[str, Any]]:
         """
@@ -66,76 +80,102 @@ class llm:
 
     def __call__(self, func):
         def wrapper(*args, **kwargs):
-            # Bind arguments
+            # Get return type
+            return_type = get_type_hints(func).get("return")
+            
+            # Get system instructions & set up the conversation
+            system_instructions = self.get_system_instructions(return_type)
             sig = inspect.signature(func)
             bound_args = sig.bind(*args, **kwargs)
             bound_args.apply_defaults()
 
             try:
-                # Get function source and extract the string
+                # Attempt to extract user_prompt from function body
                 source = inspect.getsource(func)
-                # Extract content between the first triple quotes
                 match = re.search(r'"""(.*?)"""', source, re.DOTALL)
                 if match:
-                    # Get the raw prompt template
                     user_prompt = match.group(1)
-                    if source.strip().endswith(".format"):
-                        # If using .format(), let Python handle it
-                        user_prompt = eval(
-                            f"'''{user_prompt}'''", {}, bound_args.arguments
-                        )
-                    else:
-                        # Otherwise treat as f-string
-                        user_prompt = eval(
-                            f"f'''{user_prompt}'''", {}, bound_args.arguments
-                        )
+                    # Evaluate as f-string if possible
+                    user_prompt = eval(f"f'''{user_prompt}'''", {}, bound_args.arguments)
                 else:
-                    # Fallback to docstring
+                    # Fallback to docstring if no triple-quoted string was found
                     user_prompt = inspect.getdoc(func)
                     if user_prompt:
-                        user_prompt = eval(
-                            f"f'''{user_prompt}'''", {}, bound_args.arguments
-                        )
+                        user_prompt = eval(f"f'''{user_prompt}'''", {}, bound_args.arguments)
 
             except Exception as e:
                 logger.debug(f"Error extracting string from function body: {e}")
-                # Fallback to docstring
                 user_prompt = inspect.getdoc(func)
                 if user_prompt:
-                    user_prompt = eval(
-                        f"f'''{user_prompt}'''", {}, bound_args.arguments
-                    )
+                    user_prompt = eval(f"f'''{user_prompt}'''", {}, bound_args.arguments)
 
             if not user_prompt:
-                raise ValueError(
-                    "Function must have either a string body or a docstring."
-                )
+                raise ValueError("Function must have either a string body or a docstring.")
 
-            # Parse the content
+            # Parse the user prompt into content
             content = self.parse_content(user_prompt, bound_args.arguments)
 
-            # Construct the conversation
+            # Build messages for the LLM
             messages = [
-                {"role": "system", "content": self.system_instructions},
-                {
-                    "role": "user",
-                    "content": content if len(content) > 1 else content[0]["text"],
-                },
+                {"role": "system", "content": system_instructions}
             ]
+
+            if return_type and issubclass(return_type, BaseModel):
+                # Add a reminder to produce valid JSON (in case the system prompt is insufficient)
+                content_list = self.parse_content(user_prompt, bound_args.arguments)
+                if isinstance(content_list, list) and len(content_list) == 1 and "text" in content_list[0]:
+                    content_list[0]["text"] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
+                user_msg = content_list if len(content_list) > 1 else content_list[0]["text"]
+            else:
+                user_msg = content if len(content) > 1 else content[0]["text"]
+
+            messages.append({"role": "user", "content": user_msg})
 
             # Query the provider
             raw_response = self.provider.query(messages).strip()
+            logger.debug(f"Raw LLM response:\n{raw_response}")
 
             if self.reasoning_first:
-                _ = self.extract_tag(raw_response, "reasoning")
+                reasoning = self.extract_tag(raw_response, "reasoning")
+                logger.debug(f"Extracted reasoning:\n{reasoning}")
                 answer = self.extract_tag(raw_response, "answer")
+                logger.debug(f"Extracted answer:\n{answer}")
             else:
                 answer = raw_response
 
             # Validate and cast the extracted answer
-            return_type = get_type_hints(func).get("return")
             if return_type and issubclass(return_type, BaseModel):
-                return return_type.parse_raw(answer)
+                try:
+                    # Attempt to extract JSON content if not well-formed
+                    if not answer.strip().startswith("{"):
+                        logger.warning(f"Response doesn't look like JSON, attempting to fix:\n{answer}")
+                        json_match = re.search(r"\{.*\}", answer, re.DOTALL)
+                        if json_match:
+                            answer = json_match.group(0)
+                            logger.debug(f"Extracted JSON-like content:\n{answer}")
+                        else:
+                            raise ValueError("Could not find JSON-like content in response")
+
+                    # Parse the JSON to a dictionary so we can do post-processing
+                    data = json.loads(answer)
+
+                    # Example: rename "overall_sentiment" to "sentiment" if needed
+                    if "overall_sentiment" in data and "sentiment" not in data:
+                        logger.info("Renaming 'overall_sentiment' to 'sentiment'.")
+                        data["sentiment"] = data.pop("overall_sentiment")
+
+                    # Now parse into the Pydantic model
+                    return return_type.parse_obj(data)
+                except Exception as e:
+                    logger.error(f"Failed to parse response as {return_type.__name__}: {e}")
+                    logger.error(f"Raw response was:\n{answer}")
+                    raise ValueError(
+                        f"LLM response could not be parsed as {return_type.__name__}. "
+                        f"Ensure the prompt requests a JSON response matching the model structure. "
+                        f"Error: {str(e)}"
+                    ) from e
+
+            # For primitive types or no return type
             return self.cast_type(answer, return_type)
 
         return wrapper
@@ -145,8 +185,6 @@ class llm:
         """
         Extract content between <tag>...</tag>.
         """
-        import re
-
         match = re.search(f"<{tag}>(.*?)</{tag}>", response, re.DOTALL)
         if match:
             return match.group(1).strip()

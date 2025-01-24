@@ -1,12 +1,44 @@
 import re
 import inspect
 import json
+import base64
+import requests
+from io import BytesIO
+from urllib.parse import urlparse
 from typing import get_type_hints, List, Dict, Any
 from pydantic import BaseModel
 import logging
 
 logger = logging.getLogger(__name__)
 
+def is_url(string: str) -> bool:
+    try:
+        result = urlparse(string)
+        return all([result.scheme, result.netloc])
+    except:
+        return False
+
+def get_base64_image(input_data: str) -> str:
+    """Convert input to base64 if it's a URL, or validate/return if already base64"""
+    if is_url(input_data):
+        response = requests.get(input_data)
+        response.raise_for_status()
+        image_data = BytesIO(response.content)
+        content_type = response.headers.get('content-type', 'image/jpeg')
+        base64_data = base64.b64encode(image_data.read()).decode('utf-8')
+        return f"data:{content_type};base64,{base64_data}"
+    
+    # If it's already base64 or data URI, validate and return
+    try:
+        if input_data.startswith('data:'):
+            # Already a data URI
+            return input_data
+        else:
+            # Try to decode to verify it's valid base64
+            base64.b64decode(input_data)
+            return f"data:image/jpeg;base64,{input_data}"
+    except:
+        raise ValueError("Input must be either a valid URL or base64-encoded image data")
 
 class llm:
     def __init__(self, provider, reasoning_first: bool = True):
@@ -44,10 +76,9 @@ Provide the final answer only, formatted as required.
         """
         Parse text containing special syntax for multimodal content.
         Supports:
-        - !image[url] for images (both HTTP URLs and base64 data)
+        - !image[url] for images (converts URLs to base64)
         - Regular text
         """
-        # Text is already formatted by Python, no need for additional templating
         lines = text.strip().split("\n")
         content = []
         current_text = []
@@ -61,14 +92,16 @@ Provide the final answer only, formatted as required.
                     )
                     current_text = []
 
-                image_url = match.group(1).strip()
-
-                # If it's not already a data URL, assume it's a base64 string and convert it
-                if not image_url.startswith("data:"):
-                    image_url = f"data:image/jpeg;base64,{image_url}"
-
-                # Add the image
-                content.append({"type": "image_url", "image_url": {"url": image_url}})
+                image_input = match.group(1).strip()
+                try:
+                    image_data_uri = get_base64_image(image_input)
+                    content.append({
+                        "type": "image_url", 
+                        "image_url": {"url": image_data_uri}
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to process image {image_input}: {e}")
+                    raise
             else:
                 current_text.append(line)
 

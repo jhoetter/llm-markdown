@@ -12,8 +12,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/llm-markdown",  # Add your repository URL
-    packages=find_packages(where="src"),
-    package_dir={"": "src"},
+    packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
@@ -31,6 +30,7 @@ setup(
         "pydantic",
         "typing-extensions;python_version<'3.8'",
         "langfuse",
-        "openai"
+        "openai",
+        "python-dotenv",
     ],
-) 
+)

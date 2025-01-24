@@ -37,3 +37,4 @@ if __name__ == "__main__":
         "https://picsum.photos/536/354"
     )
     print(result)
+    print(type(result))

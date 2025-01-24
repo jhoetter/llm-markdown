@@ -286,17 +286,33 @@ class llm:
             return match.group(1).strip()
         raise ValueError(f"Tag <{tag}> not found in response: {response}")
 
-    @staticmethod
-    def cast_type(value: str, return_type: type):
-        """
-        Cast the value to the specified return type.
-        """
-        if return_type == bool:
-            return value.lower() in ["true", "yes", "1"]
-        elif return_type == int:
-            return int(value)
-        elif return_type == float:
-            return float(value)
-        elif return_type == list:
-            return eval(value)
-        return value
+    def cast_type(self, value: str, target_type) -> Any:
+        """Cast a string value to the target type."""
+        if not value:
+            return value
+
+        # Handle typing annotations (List, Dict, etc)
+        origin = get_origin(target_type)
+        if origin is not None:
+            if origin in (list, List):
+                # If the value looks like a string representation of a list
+                try:
+                    if value.startswith('[') and value.endswith(']'):
+                        # Parse the string as JSON to get a proper list
+                        return json.loads(value)
+                    else:
+                        # Single value, wrap it in a list
+                        return [value]
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, split by commas and strip whitespace
+                    return [item.strip() for item in value.strip('[]').split(',') if item.strip()]
+            # Add more type handling here as needed
+            return value
+
+        # Handle primitive types
+        try:
+            if target_type == bool:
+                return value.lower() in ('true', 't', 'yes', 'y', '1')
+            return target_type(value)
+        except (ValueError, TypeError):
+            return value

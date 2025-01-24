@@ -162,6 +162,6 @@ if __name__ == "__main__":
         previous_plan=[],
     )
 
-    for chunk in plan_execution(planning_input):
-        print(chunk, end="", flush=True)
-    print()  # Final newline
+    result = plan_execution(planning_input)
+    print(result)
+    print(type(result))

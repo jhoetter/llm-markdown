@@ -138,7 +138,9 @@ class LangfuseWrapper(LLMProvider):
         return wrapped_stream()
 
     def __del__(self):
-        """
-        Ensure all observations are flushed when the wrapper is destroyed.
-        """
-        langfuse_context.flush()
+        try:
+            if hasattr(self, '_trace') and self._trace:
+                self._trace.end()
+        except Exception:
+            # Silently ignore errors during shutdown
+            pass

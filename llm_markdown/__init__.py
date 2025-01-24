@@ -5,7 +5,7 @@ import base64
 import requests
 from io import BytesIO
 from urllib.parse import urlparse
-from typing import get_type_hints, List, Dict, Any
+from typing import get_type_hints, List, Dict, Any, get_origin
 from pydantic import BaseModel
 import logging
 
@@ -53,7 +53,26 @@ class llm:
 
     def get_system_instructions(self, return_type) -> str:
         """Generate appropriate system instructions based on return type."""
-        if return_type and issubclass(return_type, BaseModel):
+        if not return_type:
+            return "You are a helpful assistant."
+
+        # Check if it's a typing annotation (List, Dict, etc)
+        if get_origin(return_type) is not None:
+            assert (
+                self.reasoning_first
+            ), "Reasoning first must be True for typing annotations"
+            return """
+            You are a helpful assistant. Always structure your output as follows:
+            <reasoning>
+            Provide the reasoning behind your answer.
+            </reasoning>
+            <answer>
+            Provide the final answer only, formatted as required.
+            </answer>
+            """
+
+        # Check if it's a Pydantic model
+        if issubclass(return_type, BaseModel):
             assert (
                 self.reasoning_first
             ), "Reasoning first must be True for Pydantic models"
@@ -67,9 +86,10 @@ class llm:
             A valid JSON object matching the required fields exactly.
             </answer>
             """
-        else:
-            if self.reasoning_first:
-                return """
+
+        # For primitive types
+        if self.reasoning_first:
+            return """
             You are a helpful assistant. Always structure your output as follows:
             <reasoning>
             Provide the reasoning behind your answer.
@@ -78,8 +98,8 @@ class llm:
             Provide the final answer only, formatted as required.
             </answer>
             """
-            else:
-                return "You are a helpful assistant."
+        else:
+            return "You are a helpful assistant."
 
     def parse_content(self, text: str, template_vars: dict) -> List[Dict[str, Any]]:
         """
@@ -167,20 +187,19 @@ class llm:
             # Build messages for the LLM
             messages = [{"role": "system", "content": system_instructions}]
 
-            if return_type and issubclass(return_type, BaseModel):
-                # Add a reminder to produce valid JSON (in case the system prompt is insufficient)
-                content_list = self.parse_content(user_prompt, bound_args.arguments)
-                if (
-                    isinstance(content_list, list)
-                    and len(content_list) == 1
-                    and "text" in content_list[0]
-                ):
-                    content_list[0][
-                        "text"
-                    ] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
-                user_msg = (
-                    content_list if len(content_list) > 1 else content_list[0]["text"]
-                )
+            # Handle special case for Pydantic models
+            if return_type and get_origin(return_type) is None:
+                try:
+                    if issubclass(return_type, BaseModel):
+                        # Add a reminder to produce valid JSON
+                        content_list = self.parse_content(user_prompt, bound_args.arguments)
+                        if isinstance(content_list, list) and len(content_list) == 1 and "text" in content_list[0]:
+                            content_list[0]["text"] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
+                        user_msg = content_list if len(content_list) > 1 else content_list[0]["text"]
+                    else:
+                        user_msg = content if len(content) > 1 else content[0]["text"]
+                except TypeError:
+                    user_msg = content if len(content) > 1 else content[0]["text"]
             else:
                 user_msg = content if len(content) > 1 else content[0]["text"]
 
@@ -206,45 +225,54 @@ class llm:
                 answer = raw_response
 
             # Validate and cast the extracted answer
-            if return_type and issubclass(return_type, BaseModel):
+            if return_type:
+                if get_origin(return_type) is not None:
+                    # Handle typing annotations (List, Dict, etc)
+                    return self.cast_type(answer, return_type)
                 try:
-                    # Attempt to extract JSON content if not well-formed
-                    if not answer.strip().startswith("{"):
-                        logger.warning(
-                            f"Response doesn't look like JSON, attempting to fix:\n{answer}"
-                        )
-                        json_match = re.search(r"\{.*\}", answer, re.DOTALL)
-                        if json_match:
-                            answer = json_match.group(0)
-                            logger.debug(f"Extracted JSON-like content:\n{answer}")
-                        else:
-                            raise ValueError(
-                                "Could not find JSON-like content in response"
+                    if issubclass(return_type, BaseModel):
+                        # Handle Pydantic models
+                        try:
+                            # Attempt to extract JSON content if not well-formed
+                            if not answer.strip().startswith("{"):
+                                logger.warning(
+                                    f"Response doesn't look like JSON, attempting to fix:\n{answer}"
+                                )
+                                json_match = re.search(r"\{.*\}", answer, re.DOTALL)
+                                if json_match:
+                                    answer = json_match.group(0)
+                                    logger.debug(f"Extracted JSON-like content:\n{answer}")
+                                else:
+                                    raise ValueError(
+                                        "Could not find JSON-like content in response"
+                                    )
+
+                            # Parse the JSON to a dictionary so we can do post-processing
+                            data = json.loads(answer)
+
+                            # Example: rename "overall_sentiment" to "sentiment" if needed
+                            if "overall_sentiment" in data and "sentiment" not in data:
+                                logger.info("Renaming 'overall_sentiment' to 'sentiment'.")
+                                data["sentiment"] = data.pop("overall_sentiment")
+
+                            # Now parse into the Pydantic model
+                            return return_type.parse_obj(data)
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to parse response as {return_type.__name__}: {e}"
                             )
+                            logger.error(f"Raw response was:\n{answer}")
+                            raise ValueError(
+                                f"LLM response could not be parsed as {return_type.__name__}. "
+                                f"Ensure the prompt requests a JSON response matching the model structure. "
+                                f"Error: {str(e)}"
+                            ) from e
+                except TypeError:
+                    # Handle primitive types
+                    return self.cast_type(answer, return_type)
 
-                    # Parse the JSON to a dictionary so we can do post-processing
-                    data = json.loads(answer)
-
-                    # Example: rename "overall_sentiment" to "sentiment" if needed
-                    if "overall_sentiment" in data and "sentiment" not in data:
-                        logger.info("Renaming 'overall_sentiment' to 'sentiment'.")
-                        data["sentiment"] = data.pop("overall_sentiment")
-
-                    # Now parse into the Pydantic model
-                    return return_type.parse_obj(data)
-                except Exception as e:
-                    logger.error(
-                        f"Failed to parse response as {return_type.__name__}: {e}"
-                    )
-                    logger.error(f"Raw response was:\n{answer}")
-                    raise ValueError(
-                        f"LLM response could not be parsed as {return_type.__name__}. "
-                        f"Ensure the prompt requests a JSON response matching the model structure. "
-                        f"Error: {str(e)}"
-                    ) from e
-
-            # For primitive types or no return type
-            return self.cast_type(answer, return_type)
+            # No return type specified
+            return answer
 
         return wrapper
 

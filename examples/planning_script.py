@@ -29,7 +29,7 @@ class PlanningInput(BaseModel):
     previous_plan: List[str]
 
 
-@llm(provider=openai_provider, reasoning_first=True)
+@llm(provider=langfuse_provider, reasoning_first=True)
 def plan_execution(planning_input: PlanningInput) -> List[str]:
     f"""
     You are a helpful assistant that plans the execution of a sequence of functions.
@@ -55,7 +55,7 @@ if __name__ == "__main__":
                 "role": "system",
                 "content": "You are a helpful AI assistant for project 'my-test-project' (ID: 1). You can call specific functions if needed.",
             },
-            {"role": "user", "content": "hi"},
+            {"role": "user", "content": "I want to translate the about section of the project to French."},
         ],
         tools=[
             {

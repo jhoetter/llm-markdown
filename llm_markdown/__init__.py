@@ -11,6 +11,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 def is_url(string: str) -> bool:
     try:
         result = urlparse(string)
@@ -18,19 +19,20 @@ def is_url(string: str) -> bool:
     except:
         return False
 
+
 def get_base64_image(input_data: str) -> str:
     """Convert input to base64 if it's a URL, or validate/return if already base64"""
     if is_url(input_data):
         response = requests.get(input_data)
         response.raise_for_status()
         image_data = BytesIO(response.content)
-        content_type = response.headers.get('content-type', 'image/jpeg')
-        base64_data = base64.b64encode(image_data.read()).decode('utf-8')
+        content_type = response.headers.get("content-type", "image/jpeg")
+        base64_data = base64.b64encode(image_data.read()).decode("utf-8")
         return f"data:{content_type};base64,{base64_data}"
-    
+
     # If it's already base64 or data URI, validate and return
     try:
-        if input_data.startswith('data:'):
+        if input_data.startswith("data:"):
             # Already a data URI
             return input_data
         else:
@@ -38,40 +40,46 @@ def get_base64_image(input_data: str) -> str:
             base64.b64decode(input_data)
             return f"data:image/jpeg;base64,{input_data}"
     except:
-        raise ValueError("Input must be either a valid URL or base64-encoded image data")
+        raise ValueError(
+            "Input must be either a valid URL or base64-encoded image data"
+        )
+
 
 class llm:
     def __init__(self, provider, reasoning_first: bool = True, stream: bool = False):
         self.provider = provider
         self.reasoning_first = reasoning_first
         self.stream = stream
-        self.base_system_instructions = "You are a helpful assistant."
 
     def get_system_instructions(self, return_type) -> str:
         """Generate appropriate system instructions based on return type."""
         if return_type and issubclass(return_type, BaseModel):
-            if self.reasoning_first:
-                return """You are a helpful assistant that always returns JSON output for Pydantic models.
-When responding, use the following structure:
-<reasoning>
-Explain the thought process (if necessary).
-</reasoning>
-<answer>
-A valid JSON object matching the required fields exactly.
-</answer>"""
-            else:
-                return """You are a helpful assistant that always returns JSON output for Pydantic models.
-Your entire response must be a single valid JSON object matching the required fields exactly, with no additional text or explanation."""
+            assert (
+                self.reasoning_first
+            ), "Reasoning first must be True for Pydantic models"
+            return """
+            You are a helpful assistant that always returns JSON output for Pydantic models.
+            When responding, use the following structure:
+            <reasoning>
+            Explain the thought process (if necessary).
+            </reasoning>
+            <answer>
+            A valid JSON object matching the required fields exactly.
+            </answer>
+            """
         else:
-            return self.base_system_instructions if not self.reasoning_first else """
-You are a helpful assistant. Always structure your output as follows:
-<reasoning>
-Provide the reasoning behind your answer.
-</reasoning>
-<answer>
-Provide the final answer only, formatted as required.
-</answer>
-"""
+            if self.reasoning_first:
+                return """
+            You are a helpful assistant. Always structure your output as follows:
+            <reasoning>
+            Provide the reasoning behind your answer.
+            </reasoning>
+            <answer>
+            Provide the final answer only, formatted as required.
+            </answer>
+            """
+            else:
+                return "You are a helpful assistant."
 
     def parse_content(self, text: str, template_vars: dict) -> List[Dict[str, Any]]:
         """
@@ -96,10 +104,9 @@ Provide the final answer only, formatted as required.
                 image_input = match.group(1).strip()
                 try:
                     image_data_uri = get_base64_image(image_input)
-                    content.append({
-                        "type": "image_url", 
-                        "image_url": {"url": image_data_uri}
-                    })
+                    content.append(
+                        {"type": "image_url", "image_url": {"url": image_data_uri}}
+                    )
                 except Exception as e:
                     logger.error(f"Failed to process image {image_input}: {e}")
                     raise
@@ -116,7 +123,7 @@ Provide the final answer only, formatted as required.
         def wrapper(*args, **kwargs):
             # Get return type
             return_type = get_type_hints(func).get("return")
-            
+
             # Get system instructions & set up the conversation
             system_instructions = self.get_system_instructions(return_type)
             sig = inspect.signature(func)
@@ -130,36 +137,50 @@ Provide the final answer only, formatted as required.
                 if match:
                     user_prompt = match.group(1)
                     # Evaluate as f-string if possible
-                    user_prompt = eval(f"f'''{user_prompt}'''", {}, bound_args.arguments)
+                    user_prompt = eval(
+                        f"f'''{user_prompt}'''", {}, bound_args.arguments
+                    )
                 else:
                     # Fallback to docstring if no triple-quoted string was found
                     user_prompt = inspect.getdoc(func)
                     if user_prompt:
-                        user_prompt = eval(f"f'''{user_prompt}'''", {}, bound_args.arguments)
+                        user_prompt = eval(
+                            f"f'''{user_prompt}'''", {}, bound_args.arguments
+                        )
 
             except Exception as e:
                 logger.debug(f"Error extracting string from function body: {e}")
                 user_prompt = inspect.getdoc(func)
                 if user_prompt:
-                    user_prompt = eval(f"f'''{user_prompt}'''", {}, bound_args.arguments)
+                    user_prompt = eval(
+                        f"f'''{user_prompt}'''", {}, bound_args.arguments
+                    )
 
             if not user_prompt:
-                raise ValueError("Function must have either a string body or a docstring.")
+                raise ValueError(
+                    "Function must have either a string body or a docstring."
+                )
 
             # Parse the user prompt into content
             content = self.parse_content(user_prompt, bound_args.arguments)
 
             # Build messages for the LLM
-            messages = [
-                {"role": "system", "content": system_instructions}
-            ]
+            messages = [{"role": "system", "content": system_instructions}]
 
             if return_type and issubclass(return_type, BaseModel):
                 # Add a reminder to produce valid JSON (in case the system prompt is insufficient)
                 content_list = self.parse_content(user_prompt, bound_args.arguments)
-                if isinstance(content_list, list) and len(content_list) == 1 and "text" in content_list[0]:
-                    content_list[0]["text"] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
-                user_msg = content_list if len(content_list) > 1 else content_list[0]["text"]
+                if (
+                    isinstance(content_list, list)
+                    and len(content_list) == 1
+                    and "text" in content_list[0]
+                ):
+                    content_list[0][
+                        "text"
+                    ] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
+                user_msg = (
+                    content_list if len(content_list) > 1 else content_list[0]["text"]
+                )
             else:
                 user_msg = content if len(content) > 1 else content[0]["text"]
 
@@ -171,7 +192,7 @@ Provide the final answer only, formatted as required.
             if self.stream:
                 # For streaming, return the generator directly
                 return raw_response
-            
+
             # Non-streaming logic remains the same
             raw_response = raw_response.strip()
             logger.debug(f"Raw LLM response:\n{raw_response}")
@@ -189,13 +210,17 @@ Provide the final answer only, formatted as required.
                 try:
                     # Attempt to extract JSON content if not well-formed
                     if not answer.strip().startswith("{"):
-                        logger.warning(f"Response doesn't look like JSON, attempting to fix:\n{answer}")
+                        logger.warning(
+                            f"Response doesn't look like JSON, attempting to fix:\n{answer}"
+                        )
                         json_match = re.search(r"\{.*\}", answer, re.DOTALL)
                         if json_match:
                             answer = json_match.group(0)
                             logger.debug(f"Extracted JSON-like content:\n{answer}")
                         else:
-                            raise ValueError("Could not find JSON-like content in response")
+                            raise ValueError(
+                                "Could not find JSON-like content in response"
+                            )
 
                     # Parse the JSON to a dictionary so we can do post-processing
                     data = json.loads(answer)
@@ -208,7 +233,9 @@ Provide the final answer only, formatted as required.
                     # Now parse into the Pydantic model
                     return return_type.parse_obj(data)
                 except Exception as e:
-                    logger.error(f"Failed to parse response as {return_type.__name__}: {e}")
+                    logger.error(
+                        f"Failed to parse response as {return_type.__name__}: {e}"
+                    )
                     logger.error(f"Raw response was:\n{answer}")
                     raise ValueError(
                         f"LLM response could not be parsed as {return_type.__name__}. "

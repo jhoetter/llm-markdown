@@ -5,6 +5,7 @@ from langfuse.media import LangfuseMedia
 import logging
 import re
 import base64
+from typing import Union, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ class LangfuseWrapper(LLMProvider):
         return sanitized
 
     @observe(as_type="generation")
-    def query(self, messages: list[dict]) -> str:
+    def query(self, messages: list[dict], stream: bool = False) -> Union[str, Iterator[str]]:
         """
         Send messages to the underlying provider and log to Langfuse.
         """
@@ -105,19 +106,36 @@ class LangfuseWrapper(LLMProvider):
             model=model,
             metadata={
                 "provider": self.provider.__class__.__name__,
-                "original_message_count": len(messages)
+                "original_message_count": len(messages),
+                "streaming": stream
             }
         )
 
         # Call provider
-        response = self.provider.query(messages)
+        response = self.provider.query(messages, stream=stream)
 
-        # Update with response
-        langfuse_context.update_current_observation(
-            output=response
-        )
-
-        return response
+        if not stream:
+            # Update with complete response
+            langfuse_context.update_current_observation(
+                output=response
+            )
+            return response
+        
+        # For streaming, wrap the generator to log the complete response at the end
+        def wrapped_stream():
+            chunks = []
+            try:
+                for chunk in response:
+                    chunks.append(chunk)
+                    yield chunk
+            finally:
+                # Log complete response when stream ends
+                complete_response = ''.join(chunks)
+                langfuse_context.update_current_observation(
+                    output=complete_response
+                )
+        
+        return wrapped_stream()
 
     def __del__(self):
         """

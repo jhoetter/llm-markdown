@@ -41,9 +41,10 @@ def get_base64_image(input_data: str) -> str:
         raise ValueError("Input must be either a valid URL or base64-encoded image data")
 
 class llm:
-    def __init__(self, provider, reasoning_first: bool = True):
+    def __init__(self, provider, reasoning_first: bool = True, stream: bool = False):
         self.provider = provider
         self.reasoning_first = reasoning_first
+        self.stream = stream
         self.base_system_instructions = "You are a helpful assistant."
 
     def get_system_instructions(self, return_type) -> str:
@@ -165,7 +166,14 @@ Provide the final answer only, formatted as required.
             messages.append({"role": "user", "content": user_msg})
 
             # Query the provider
-            raw_response = self.provider.query(messages).strip()
+            raw_response = self.provider.query(messages, stream=self.stream)
+
+            if self.stream:
+                # For streaming, return the generator directly
+                return raw_response
+            
+            # Non-streaming logic remains the same
+            raw_response = raw_response.strip()
             logger.debug(f"Raw LLM response:\n{raw_response}")
 
             if self.reasoning_first:

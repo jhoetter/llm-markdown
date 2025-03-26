@@ -69,6 +69,8 @@ class llm:
             <answer>
             Provide the final answer only, formatted as required.
             </answer>
+
+            You MUST follow the schema above exactly, i.e. start with the <reasoning> tag, close it with </reasoning>, then start the <answer> tag and close it with </answer>.
             """
 
         # Check if it's a Pydantic model
@@ -76,15 +78,23 @@ class llm:
             assert (
                 self.reasoning_first
             ), "Reasoning first must be True for Pydantic models"
-            return """
+            # Get the JSON schema for the Pydantic model
+            schema = return_type.schema_json(indent=2)
+            return f"""
             You are a helpful assistant that always returns JSON output for Pydantic models.
+            The expected response MUST exactly match this JSON schema:
+            {schema}
+
             When responding, use the following structure:
             <reasoning>
             Explain the thought process (if necessary).
             </reasoning>
             <answer>
-            A valid JSON object matching the required fields exactly.
+            A valid JSON object matching the schema above exactly.
             </answer>
+
+            You MUST follow the schema above exactly, i.e. start with the <reasoning> tag, close it with </reasoning>, then start the <answer> tag and close it with </answer>.
+            In the <answer> tag, you MUST return a valid JSON object matching the schema above exactly.
             """
 
         # For primitive types
@@ -97,6 +107,9 @@ class llm:
             <answer>
             Provide the final answer only, formatted as required.
             </answer>
+
+            You MUST follow the schema above exactly, i.e. start with the <reasoning> tag, close it with </reasoning>, then start the <answer> tag and close it with </answer>.
+            In the <answer> tag, you MUST return the final answer only, formatted as required.
             """
         else:
             return "You are a helpful assistant."

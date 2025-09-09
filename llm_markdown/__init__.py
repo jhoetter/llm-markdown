@@ -153,141 +153,283 @@ class llm:
         return content
 
     def __call__(self, func):
-        def wrapper(*args, **kwargs):
-            # Get return type
-            return_type = get_type_hints(func).get("return")
+        # Check if the decorated function is async
+        is_async = inspect.iscoroutinefunction(func)
+        
+        if is_async:
+            # If it's an async function, return an async wrapper
+            async def async_wrapper(*args, **kwargs):
+                # Get return type
+                return_type = get_type_hints(func).get("return")
 
-            # Get system instructions & set up the conversation
-            system_instructions = self.get_system_instructions(return_type)
-            sig = inspect.signature(func)
-            bound_args = sig.bind(*args, **kwargs)
-            bound_args.apply_defaults()
+                # Get system instructions & set up the conversation
+                system_instructions = self.get_system_instructions(return_type)
+                sig = inspect.signature(func)
+                bound_args = sig.bind(*args, **kwargs)
+                bound_args.apply_defaults()
 
-            try:
-                # Attempt to extract user_prompt from function body
-                source = inspect.getsource(func)
-                match = re.search(r'"""(.*?)"""', source, re.DOTALL)
-                if match:
-                    user_prompt = match.group(1)
-                    # Evaluate as f-string if possible
-                    user_prompt = eval(
-                        f"f'''{user_prompt}'''", {}, bound_args.arguments
-                    )
-                else:
-                    # Fallback to docstring if no triple-quoted string was found
+                try:
+                    # Attempt to extract user_prompt from function body
+                    source = inspect.getsource(func)
+                    match = re.search(r'"""(.*?)"""', source, re.DOTALL)
+                    if match:
+                        user_prompt = match.group(1)
+                        # Evaluate as f-string if possible
+                        user_prompt = eval(
+                            f"f'''{user_prompt}'''", {}, bound_args.arguments
+                        )
+                    else:
+                        # Fallback to docstring if no triple-quoted string was found
+                        user_prompt = inspect.getdoc(func)
+                        if user_prompt:
+                            user_prompt = eval(
+                                f"f'''{user_prompt}'''", {}, bound_args.arguments
+                            )
+
+                except Exception as e:
+                    logger.debug(f"Error extracting string from function body: {e}")
                     user_prompt = inspect.getdoc(func)
                     if user_prompt:
                         user_prompt = eval(
                             f"f'''{user_prompt}'''", {}, bound_args.arguments
                         )
 
-            except Exception as e:
-                logger.debug(f"Error extracting string from function body: {e}")
-                user_prompt = inspect.getdoc(func)
-                if user_prompt:
-                    user_prompt = eval(
-                        f"f'''{user_prompt}'''", {}, bound_args.arguments
+                if not user_prompt:
+                    raise ValueError(
+                        "Function must have either a string body or a docstring."
                     )
 
-            if not user_prompt:
-                raise ValueError(
-                    "Function must have either a string body or a docstring."
-                )
+                # Parse the user prompt into content
+                content = self.parse_content(user_prompt, bound_args.arguments)
 
-            # Parse the user prompt into content
-            content = self.parse_content(user_prompt, bound_args.arguments)
+                # Build messages for the LLM
+                messages = [{"role": "system", "content": system_instructions}]
 
-            # Build messages for the LLM
-            messages = [{"role": "system", "content": system_instructions}]
-
-            # Handle special case for Pydantic models
-            if return_type and get_origin(return_type) is None:
-                try:
-                    if issubclass(return_type, BaseModel):
-                        # Add a reminder to produce valid JSON
-                        content_list = self.parse_content(user_prompt, bound_args.arguments)
-                        if isinstance(content_list, list) and len(content_list) == 1 and "text" in content_list[0]:
-                            content_list[0]["text"] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
-                        user_msg = content_list if len(content_list) > 1 else content_list[0]["text"]
-                    else:
+                # Handle special case for Pydantic models
+                if return_type and get_origin(return_type) is None:
+                    try:
+                        if issubclass(return_type, BaseModel):
+                            # Add a reminder to produce valid JSON
+                            content_list = self.parse_content(user_prompt, bound_args.arguments)
+                            if isinstance(content_list, list) and len(content_list) == 1 and "text" in content_list[0]:
+                                content_list[0]["text"] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
+                            user_msg = content_list if len(content_list) > 1 else content_list[0]["text"]
+                        else:
+                            user_msg = content if len(content) > 1 else content[0]["text"]
+                    except TypeError:
                         user_msg = content if len(content) > 1 else content[0]["text"]
-                except TypeError:
+                else:
                     user_msg = content if len(content) > 1 else content[0]["text"]
-            else:
-                user_msg = content if len(content) > 1 else content[0]["text"]
 
-            messages.append({"role": "user", "content": user_msg})
+                messages.append({"role": "user", "content": user_msg})
 
-            # Query the provider
-            raw_response = self.provider.query(messages, stream=self.stream)
+                # Query the provider - use await for async
+                raw_response = await self.provider.query_async(messages, stream=self.stream)
 
-            if self.stream:
-                # For streaming, return the generator directly
-                return raw_response
+                if self.stream:
+                    # For streaming, return the generator directly
+                    return raw_response
 
-            # Non-streaming logic remains the same
-            raw_response = raw_response.strip()
-            logger.debug(f"Raw LLM response:\n{raw_response}")
+                # Non-streaming logic remains the same
+                raw_response = raw_response.strip()
+                logger.debug(f"Raw LLM response:\n{raw_response}")
 
-            if self.reasoning_first:
-                reasoning = self.extract_tag(raw_response, "reasoning")
-                logger.debug(f"Extracted reasoning:\n{reasoning}")
-                answer = self.extract_tag(raw_response, "answer")
-                logger.debug(f"Extracted answer:\n{answer}")
-            else:
-                answer = raw_response
+                if self.reasoning_first:
+                    reasoning = self.extract_tag(raw_response, "reasoning")
+                    logger.debug(f"Extracted reasoning:\n{reasoning}")
+                    answer = self.extract_tag(raw_response, "answer")
+                    logger.debug(f"Extracted answer:\n{answer}")
+                else:
+                    answer = raw_response
 
-            # Validate and cast the extracted answer
-            if return_type:
-                if get_origin(return_type) is not None:
-                    # Handle typing annotations (List, Dict, etc)
-                    return self.cast_type(answer, return_type)
-                try:
-                    if issubclass(return_type, BaseModel):
-                        # Handle Pydantic models
-                        try:
-                            # Attempt to extract JSON content if not well-formed
-                            if not answer.strip().startswith("{"):
-                                logger.warning(
-                                    f"Response doesn't look like JSON, attempting to fix:\n{answer}"
-                                )
-                                json_match = re.search(r"\{.*\}", answer, re.DOTALL)
-                                if json_match:
-                                    answer = json_match.group(0)
-                                    logger.debug(f"Extracted JSON-like content:\n{answer}")
-                                else:
-                                    raise ValueError(
-                                        "Could not find JSON-like content in response"
+                # Validate and cast the extracted answer
+                if return_type:
+                    if get_origin(return_type) is not None:
+                        # Handle typing annotations (List, Dict, etc)
+                        return self.cast_type(answer, return_type)
+                    try:
+                        if issubclass(return_type, BaseModel):
+                            # Handle Pydantic models
+                            try:
+                                # Attempt to extract JSON content if not well-formed
+                                if not answer.strip().startswith("{"):
+                                    logger.warning(
+                                        f"Response doesn't look like JSON, attempting to fix:\n{answer}"
                                     )
+                                    json_match = re.search(r"\{.*\}", answer, re.DOTALL)
+                                    if json_match:
+                                        answer = json_match.group(0)
+                                        logger.debug(f"Extracted JSON-like content:\n{answer}")
+                                    else:
+                                        raise ValueError(
+                                            "Could not find JSON-like content in response"
+                                        )
 
-                            # Parse the JSON to a dictionary so we can do post-processing
-                            data = json.loads(answer)
+                                # Parse the JSON to a dictionary so we can do post-processing
+                                data = json.loads(answer)
 
-                            # Example: rename "overall_sentiment" to "sentiment" if needed
-                            if "overall_sentiment" in data and "sentiment" not in data:
-                                logger.info("Renaming 'overall_sentiment' to 'sentiment'.")
-                                data["sentiment"] = data.pop("overall_sentiment")
+                                # Example: rename "overall_sentiment" to "sentiment" if needed
+                                if "overall_sentiment" in data and "sentiment" not in data:
+                                    logger.info("Renaming 'overall_sentiment' to 'sentiment'.")
+                                    data["sentiment"] = data.pop("overall_sentiment")
 
-                            # Now parse into the Pydantic model
-                            return return_type.parse_obj(data)
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to parse response as {return_type.__name__}: {e}"
+                                # Now parse into the Pydantic model
+                                return return_type.parse_obj(data)
+                            except Exception as e:
+                                logger.error(
+                                    f"Failed to parse response as {return_type.__name__}: {e}"
+                                )
+                                logger.error(f"Raw response was:\n{answer}")
+                                raise ValueError(
+                                    f"LLM response could not be parsed as {return_type.__name__}. "
+                                    f"Ensure the prompt requests a JSON response matching the model structure. "
+                                    f"Error: {str(e)}"
+                                ) from e
+                    except TypeError:
+                        # Handle primitive types
+                        return self.cast_type(answer, return_type)
+
+                # No return type specified
+                return answer
+
+            return async_wrapper
+        else:
+            # For synchronous functions, use the original wrapper
+            def wrapper(*args, **kwargs):
+                # Get return type
+                return_type = get_type_hints(func).get("return")
+
+                # Get system instructions & set up the conversation
+                system_instructions = self.get_system_instructions(return_type)
+                sig = inspect.signature(func)
+                bound_args = sig.bind(*args, **kwargs)
+                bound_args.apply_defaults()
+
+                try:
+                    # Attempt to extract user_prompt from function body
+                    source = inspect.getsource(func)
+                    match = re.search(r'"""(.*?)"""', source, re.DOTALL)
+                    if match:
+                        user_prompt = match.group(1)
+                        # Evaluate as f-string if possible
+                        user_prompt = eval(
+                            f"f'''{user_prompt}'''", {}, bound_args.arguments
+                        )
+                    else:
+                        # Fallback to docstring if no triple-quoted string was found
+                        user_prompt = inspect.getdoc(func)
+                        if user_prompt:
+                            user_prompt = eval(
+                                f"f'''{user_prompt}'''", {}, bound_args.arguments
                             )
-                            logger.error(f"Raw response was:\n{answer}")
-                            raise ValueError(
-                                f"LLM response could not be parsed as {return_type.__name__}. "
-                                f"Ensure the prompt requests a JSON response matching the model structure. "
-                                f"Error: {str(e)}"
-                            ) from e
-                except TypeError:
-                    # Handle primitive types
-                    return self.cast_type(answer, return_type)
 
-            # No return type specified
-            return answer
+                except Exception as e:
+                    logger.debug(f"Error extracting string from function body: {e}")
+                    user_prompt = inspect.getdoc(func)
+                    if user_prompt:
+                        user_prompt = eval(
+                            f"f'''{user_prompt}'''", {}, bound_args.arguments
+                        )
 
-        return wrapper
+                if not user_prompt:
+                    raise ValueError(
+                        "Function must have either a string body or a docstring."
+                    )
+
+                # Parse the user prompt into content
+                content = self.parse_content(user_prompt, bound_args.arguments)
+
+                # Build messages for the LLM
+                messages = [{"role": "system", "content": system_instructions}]
+
+                # Handle special case for Pydantic models
+                if return_type and get_origin(return_type) is None:
+                    try:
+                        if issubclass(return_type, BaseModel):
+                            # Add a reminder to produce valid JSON
+                            content_list = self.parse_content(user_prompt, bound_args.arguments)
+                            if isinstance(content_list, list) and len(content_list) == 1 and "text" in content_list[0]:
+                                content_list[0]["text"] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
+                            user_msg = content_list if len(content_list) > 1 else content_list[0]["text"]
+                        else:
+                            user_msg = content if len(content) > 1 else content[0]["text"]
+                    except TypeError:
+                        user_msg = content if len(content) > 1 else content[0]["text"]
+                else:
+                    user_msg = content if len(content) > 1 else content[0]["text"]
+
+                messages.append({"role": "user", "content": user_msg})
+
+                # Query the provider
+                raw_response = self.provider.query(messages, stream=self.stream)
+
+                if self.stream:
+                    # For streaming, return the generator directly
+                    return raw_response
+
+                # Non-streaming logic remains the same
+                raw_response = raw_response.strip()
+                logger.debug(f"Raw LLM response:\n{raw_response}")
+
+                if self.reasoning_first:
+                    reasoning = self.extract_tag(raw_response, "reasoning")
+                    logger.debug(f"Extracted reasoning:\n{reasoning}")
+                    answer = self.extract_tag(raw_response, "answer")
+                    logger.debug(f"Extracted answer:\n{answer}")
+                else:
+                    answer = raw_response
+
+                # Validate and cast the extracted answer
+                if return_type:
+                    if get_origin(return_type) is not None:
+                        # Handle typing annotations (List, Dict, etc)
+                        return self.cast_type(answer, return_type)
+                    try:
+                        if issubclass(return_type, BaseModel):
+                            # Handle Pydantic models
+                            try:
+                                # Attempt to extract JSON content if not well-formed
+                                if not answer.strip().startswith("{"):
+                                    logger.warning(
+                                        f"Response doesn't look like JSON, attempting to fix:\n{answer}"
+                                    )
+                                    json_match = re.search(r"\{.*\}", answer, re.DOTALL)
+                                    if json_match:
+                                        answer = json_match.group(0)
+                                        logger.debug(f"Extracted JSON-like content:\n{answer}")
+                                    else:
+                                        raise ValueError(
+                                            "Could not find JSON-like content in response"
+                                        )
+
+                                # Parse the JSON to a dictionary so we can do post-processing
+                                data = json.loads(answer)
+
+                                # Example: rename "overall_sentiment" to "sentiment" if needed
+                                if "overall_sentiment" in data and "sentiment" not in data:
+                                    logger.info("Renaming 'overall_sentiment' to 'sentiment'.")
+                                    data["sentiment"] = data.pop("overall_sentiment")
+
+                                # Now parse into the Pydantic model
+                                return return_type.parse_obj(data)
+                            except Exception as e:
+                                logger.error(
+                                    f"Failed to parse response as {return_type.__name__}: {e}"
+                                )
+                                logger.error(f"Raw response was:\n{answer}")
+                                raise ValueError(
+                                    f"LLM response could not be parsed as {return_type.__name__}. "
+                                    f"Ensure the prompt requests a JSON response matching the model structure. "
+                                    f"Error: {str(e)}"
+                                ) from e
+                    except TypeError:
+                        # Handle primitive types
+                        return self.cast_type(answer, return_type)
+
+                # No return type specified
+                return answer
+
+            return wrapper
 
     @staticmethod
     def extract_tag(response: str, tag: str) -> str:

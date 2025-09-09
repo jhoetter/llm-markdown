@@ -5,7 +5,7 @@ from langfuse.media import LangfuseMedia
 import logging
 import re
 import base64
-from typing import Union, Iterator
+from typing import Union, Iterator, AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +126,56 @@ class LangfuseWrapper(LLMProvider):
             chunks = []
             try:
                 for chunk in response:
+                    chunks.append(chunk)
+                    yield chunk
+            finally:
+                # Log complete response when stream ends
+                complete_response = ''.join(chunks)
+                langfuse_context.update_current_observation(
+                    output=complete_response
+                )
+        
+        return wrapped_stream()
+        
+    @observe(as_type="generation")
+    async def query_async(self, messages: list[dict], stream: bool = False) -> Union[str, AsyncIterator[str]]:
+        """
+        Async version to send messages to the underlying provider and log to Langfuse.
+        """
+        # Extract model info if available
+        model = getattr(self.provider, 'model', 'unknown')
+        
+        # Process messages with proper media handling
+        sanitized_messages = [self._sanitize_message(msg) for msg in messages]
+        
+        # Update observation
+        langfuse_context.update_current_observation(
+            name="llm_query_async",
+            input=sanitized_messages,
+            model=model,
+            metadata={
+                "provider": self.provider.__class__.__name__,
+                "original_message_count": len(messages),
+                "streaming": stream,
+                "async": True
+            }
+        )
+
+        # Call provider asynchronously
+        response = await self.provider.query_async(messages, stream=stream)
+
+        if not stream:
+            # Update with complete response
+            langfuse_context.update_current_observation(
+                output=response
+            )
+            return response
+        
+        # For streaming, wrap the generator to log the complete response at the end
+        async def wrapped_stream():
+            chunks = []
+            try:
+                async for chunk in response:
                     chunks.append(chunk)
                     yield chunk
             finally:

@@ -33,8 +33,6 @@ def transcribe_image(image_base64: str) -> str:
 
 
 if __name__ == "__main__":
-    result = transcribe_image(
-        "https://picsum.photos/536/354"
-    )
+    result = transcribe_image("https://picsum.photos/536/354")
     print(result)
     print(type(result))

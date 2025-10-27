@@ -1,15 +1,16 @@
 from llm_markdown import llm
-from llm_markdown.providers.openai import OpenAIProvider
+from llm_markdown.providers.openai import OpenAILegacyProvider
 from llm_markdown.providers.langfuse import LangfuseWrapper
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
-# Define a LLM provider, e.g. OpenAI
-openai_provider = OpenAIProvider(
+# Define a LLM provider using legacy OpenAI models
+openai_provider = OpenAILegacyProvider(
     api_key=os.getenv("OPENAI_API_KEY"),
     model="gpt-4o-mini",
+    max_tokens=4096,
 )
 
 # You can also wrap the provider with Langfuse to log the LLM interactions

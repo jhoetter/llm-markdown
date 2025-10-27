@@ -1,5 +1,5 @@
 from llm_markdown import llm
-from llm_markdown.providers.openai import OpenAIProvider
+from llm_markdown.providers.openai import OpenAILegacyProvider
 from llm_markdown.providers.langfuse import LangfuseWrapper
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -8,10 +8,11 @@ import os
 
 load_dotenv()
 
-# Define a LLM provider, e.g. OpenAI
-openai_provider = OpenAIProvider(
+# Define a LLM provider using legacy OpenAI models
+openai_provider = OpenAILegacyProvider(
     api_key=os.getenv("OPENAI_API_KEY"),
     model="gpt-4o-mini",
+    max_tokens=4096,
 )
 
 # You can also wrap the provider with Langfuse to log the LLM interactions
@@ -55,7 +56,10 @@ if __name__ == "__main__":
                 "role": "system",
                 "content": "You are a helpful AI assistant for project 'my-test-project' (ID: 1). You can call specific functions if needed.",
             },
-            {"role": "user", "content": "I want to translate the about section of the project to French."},
+            {
+                "role": "user",
+                "content": "I want to translate the about section of the project to French.",
+            },
         ],
         tools=[
             {

@@ -1,15 +1,16 @@
 from llm_markdown import llm
-from llm_markdown.providers.openai import OpenAIProvider
+from llm_markdown.providers.openai import OpenAILegacyProvider
 from dotenv import load_dotenv
 from pydantic import BaseModel
 import os
 
 load_dotenv()
 
-# Define a LLM provider, e.g. OpenAI
-openai_provider = OpenAIProvider(
+# Define a LLM provider using legacy OpenAI models
+openai_provider = OpenAILegacyProvider(
     api_key=os.getenv("OPENAI_API_KEY"),
     model="gpt-4o-mini",
+    max_tokens=4096,
 )
 
 
@@ -51,4 +52,3 @@ if __name__ == "__main__":
     )
     print(result)
     print(type(result))
-    

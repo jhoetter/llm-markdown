@@ -79,7 +79,7 @@ class llm:
                 self.reasoning_first
             ), "Reasoning first must be True for Pydantic models"
             # Get the JSON schema for the Pydantic model
-            schema = return_type.schema_json(indent=2)
+            schema = return_type.model_json_schema(indent=2)
             return f"""
             You are a helpful assistant that always returns JSON output for Pydantic models.
             The expected response MUST exactly match this JSON schema:
@@ -155,7 +155,7 @@ class llm:
     def __call__(self, func):
         # Check if the decorated function is async
         is_async = inspect.iscoroutinefunction(func)
-        
+
         if is_async:
             # If it's an async function, return an async wrapper
             async def async_wrapper(*args, **kwargs):
@@ -210,12 +210,26 @@ class llm:
                     try:
                         if issubclass(return_type, BaseModel):
                             # Add a reminder to produce valid JSON
-                            content_list = self.parse_content(user_prompt, bound_args.arguments)
-                            if isinstance(content_list, list) and len(content_list) == 1 and "text" in content_list[0]:
-                                content_list[0]["text"] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
-                            user_msg = content_list if len(content_list) > 1 else content_list[0]["text"]
+                            content_list = self.parse_content(
+                                user_prompt, bound_args.arguments
+                            )
+                            if (
+                                isinstance(content_list, list)
+                                and len(content_list) == 1
+                                and "text" in content_list[0]
+                            ):
+                                content_list[0][
+                                    "text"
+                                ] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
+                            user_msg = (
+                                content_list
+                                if len(content_list) > 1
+                                else content_list[0]["text"]
+                            )
                         else:
-                            user_msg = content if len(content) > 1 else content[0]["text"]
+                            user_msg = (
+                                content if len(content) > 1 else content[0]["text"]
+                            )
                     except TypeError:
                         user_msg = content if len(content) > 1 else content[0]["text"]
                 else:
@@ -224,7 +238,9 @@ class llm:
                 messages.append({"role": "user", "content": user_msg})
 
                 # Query the provider - use await for async
-                raw_response = await self.provider.query_async(messages, stream=self.stream)
+                raw_response = await self.provider.query_async(
+                    messages, stream=self.stream
+                )
 
                 if self.stream:
                     # For streaming, return the generator directly
@@ -259,7 +275,9 @@ class llm:
                                     json_match = re.search(r"\{.*\}", answer, re.DOTALL)
                                     if json_match:
                                         answer = json_match.group(0)
-                                        logger.debug(f"Extracted JSON-like content:\n{answer}")
+                                        logger.debug(
+                                            f"Extracted JSON-like content:\n{answer}"
+                                        )
                                     else:
                                         raise ValueError(
                                             "Could not find JSON-like content in response"
@@ -269,12 +287,17 @@ class llm:
                                 data = json.loads(answer)
 
                                 # Example: rename "overall_sentiment" to "sentiment" if needed
-                                if "overall_sentiment" in data and "sentiment" not in data:
-                                    logger.info("Renaming 'overall_sentiment' to 'sentiment'.")
+                                if (
+                                    "overall_sentiment" in data
+                                    and "sentiment" not in data
+                                ):
+                                    logger.info(
+                                        "Renaming 'overall_sentiment' to 'sentiment'."
+                                    )
                                     data["sentiment"] = data.pop("overall_sentiment")
 
                                 # Now parse into the Pydantic model
-                                return return_type.parse_obj(data)
+                                return return_type.model_validate(data)
                             except Exception as e:
                                 logger.error(
                                     f"Failed to parse response as {return_type.__name__}: {e}"
@@ -347,12 +370,26 @@ class llm:
                     try:
                         if issubclass(return_type, BaseModel):
                             # Add a reminder to produce valid JSON
-                            content_list = self.parse_content(user_prompt, bound_args.arguments)
-                            if isinstance(content_list, list) and len(content_list) == 1 and "text" in content_list[0]:
-                                content_list[0]["text"] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
-                            user_msg = content_list if len(content_list) > 1 else content_list[0]["text"]
+                            content_list = self.parse_content(
+                                user_prompt, bound_args.arguments
+                            )
+                            if (
+                                isinstance(content_list, list)
+                                and len(content_list) == 1
+                                and "text" in content_list[0]
+                            ):
+                                content_list[0][
+                                    "text"
+                                ] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
+                            user_msg = (
+                                content_list
+                                if len(content_list) > 1
+                                else content_list[0]["text"]
+                            )
                         else:
-                            user_msg = content if len(content) > 1 else content[0]["text"]
+                            user_msg = (
+                                content if len(content) > 1 else content[0]["text"]
+                            )
                     except TypeError:
                         user_msg = content if len(content) > 1 else content[0]["text"]
                 else:
@@ -396,7 +433,9 @@ class llm:
                                     json_match = re.search(r"\{.*\}", answer, re.DOTALL)
                                     if json_match:
                                         answer = json_match.group(0)
-                                        logger.debug(f"Extracted JSON-like content:\n{answer}")
+                                        logger.debug(
+                                            f"Extracted JSON-like content:\n{answer}"
+                                        )
                                     else:
                                         raise ValueError(
                                             "Could not find JSON-like content in response"
@@ -406,12 +445,17 @@ class llm:
                                 data = json.loads(answer)
 
                                 # Example: rename "overall_sentiment" to "sentiment" if needed
-                                if "overall_sentiment" in data and "sentiment" not in data:
-                                    logger.info("Renaming 'overall_sentiment' to 'sentiment'.")
+                                if (
+                                    "overall_sentiment" in data
+                                    and "sentiment" not in data
+                                ):
+                                    logger.info(
+                                        "Renaming 'overall_sentiment' to 'sentiment'."
+                                    )
                                     data["sentiment"] = data.pop("overall_sentiment")
 
                                 # Now parse into the Pydantic model
-                                return return_type.parse_obj(data)
+                                return return_type.model_validate(data)
                             except Exception as e:
                                 logger.error(
                                     f"Failed to parse response as {return_type.__name__}: {e}"
@@ -452,7 +496,7 @@ class llm:
             if origin in (list, List):
                 # If the value looks like a string representation of a list
                 try:
-                    if value.startswith('[') and value.endswith(']'):
+                    if value.startswith("[") and value.endswith("]"):
                         # Parse the string as JSON to get a proper list
                         return json.loads(value)
                     else:
@@ -460,14 +504,18 @@ class llm:
                         return [value]
                 except json.JSONDecodeError:
                     # If JSON parsing fails, split by commas and strip whitespace
-                    return [item.strip() for item in value.strip('[]').split(',') if item.strip()]
+                    return [
+                        item.strip()
+                        for item in value.strip("[]").split(",")
+                        if item.strip()
+                    ]
             # Add more type handling here as needed
             return value
 
         # Handle primitive types
         try:
             if target_type == bool:
-                return value.lower() in ('true', 't', 'yes', 'y', '1')
+                return value.lower() in ("true", "t", "yes", "y", "1")
             return target_type(value)
         except (ValueError, TypeError):
             return value

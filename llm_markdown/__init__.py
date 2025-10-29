@@ -79,7 +79,7 @@ class llm:
                 self.reasoning_first
             ), "Reasoning first must be True for Pydantic models"
             # Get the JSON schema for the Pydantic model
-            schema = return_type.model_json_schema(indent=2)
+            schema = return_type.model_json_schema()
             return f"""
             You are a helpful assistant that always returns JSON output for Pydantic models.
             The expected response MUST exactly match this JSON schema:

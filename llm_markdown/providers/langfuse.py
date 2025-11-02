@@ -1,5 +1,5 @@
 from .base import LLMProvider
-from langfuse import get_client, observe
+from langfuse import get_client
 from langfuse.media import LangfuseMedia
 import logging
 import re
@@ -90,7 +90,6 @@ class LangfuseWrapper(LLMProvider):
 
         return sanitized
 
-    @observe(name="llm_query")
     def query(
         self, messages: list[dict], stream: bool = False
     ) -> Union[str, Iterator[str]]:
@@ -107,8 +106,34 @@ class LangfuseWrapper(LLMProvider):
         response = self.provider.query(messages, stream=stream)
 
         if not stream:
-            # For non-streaming, return the response directly
-            # The @observe decorator will automatically capture input/output
+            # Get usage information from provider if available
+            usage = getattr(self.provider, "_last_usage", None)
+            
+            # Create generation with usage info for cost tracking
+            try:
+                gen_kwargs = {
+                    "name": "llm_query",
+                    "input": sanitized_messages,
+                    "output": response,
+                }
+                
+                # Add model if available
+                if model != "unknown":
+                    gen_kwargs["model"] = model
+                
+                # Add usage info if available for cost tracking
+                if usage and usage.get("total_tokens"):
+                    gen_kwargs["usage_details"] = {
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    }
+                
+                gen = self.langfuse.start_generation(**gen_kwargs)
+                gen.end()
+            except Exception as e:
+                logger.warning(f"Failed to log to Langfuse: {e}")
+            
             return response
 
         # For streaming, we need to collect all chunks to log the complete response
@@ -117,11 +142,37 @@ class LangfuseWrapper(LLMProvider):
             for chunk in response:
                 chunks.append(chunk)
                 yield chunk
-            # The complete response will be captured by the decorator
+            
+            # After streaming completes, collect full response and log with usage info
+            full_response = "".join(chunks)
+            usage = getattr(self.provider, "_last_usage", None)
+            
+            try:
+                gen_kwargs = {
+                    "name": "llm_query",
+                    "input": sanitized_messages,
+                    "output": full_response,
+                }
+                
+                # Add model if available
+                if model != "unknown":
+                    gen_kwargs["model"] = model
+                
+                # Add usage info if available for cost tracking
+                if usage and usage.get("total_tokens"):
+                    gen_kwargs["usage_details"] = {
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    }
+                
+                gen = self.langfuse.start_generation(**gen_kwargs)
+                gen.end()
+            except Exception as e:
+                logger.warning(f"Failed to log to Langfuse: {e}")
 
         return wrapped_stream()
 
-    @observe(name="llm_query_async")
     async def query_async(
         self, messages: list[dict], stream: bool = False
     ) -> Union[str, AsyncIterator[str]]:
@@ -138,8 +189,34 @@ class LangfuseWrapper(LLMProvider):
         response = await self.provider.query_async(messages, stream=stream)
 
         if not stream:
-            # For non-streaming, return the response directly
-            # The @observe decorator will automatically capture input/output
+            # Get usage information from provider if available
+            usage = getattr(self.provider, "_last_usage", None)
+            
+            # Create generation with usage info for cost tracking
+            try:
+                gen_kwargs = {
+                    "name": "llm_query_async",
+                    "input": sanitized_messages,
+                    "output": response,
+                }
+                
+                # Add model if available
+                if model != "unknown":
+                    gen_kwargs["model"] = model
+                
+                # Add usage info if available for cost tracking
+                if usage and usage.get("total_tokens"):
+                    gen_kwargs["usage_details"] = {
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    }
+                
+                gen = self.langfuse.start_generation(**gen_kwargs)
+                gen.end()
+            except Exception as e:
+                logger.warning(f"Failed to log to Langfuse: {e}")
+            
             return response
 
         # For streaming, we need to collect all chunks to log the complete response
@@ -148,7 +225,34 @@ class LangfuseWrapper(LLMProvider):
             async for chunk in response:
                 chunks.append(chunk)
                 yield chunk
-            # The complete response will be captured by the decorator
+            
+            # After streaming completes, collect full response and log with usage info
+            full_response = "".join(chunks)
+            usage = getattr(self.provider, "_last_usage", None)
+            
+            try:
+                gen_kwargs = {
+                    "name": "llm_query_async",
+                    "input": sanitized_messages,
+                    "output": full_response,
+                }
+                
+                # Add model if available
+                if model != "unknown":
+                    gen_kwargs["model"] = model
+                
+                # Add usage info if available for cost tracking
+                if usage and usage.get("total_tokens"):
+                    gen_kwargs["usage_details"] = {
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    }
+                
+                gen = self.langfuse.start_generation(**gen_kwargs)
+                gen.end()
+            except Exception as e:
+                logger.warning(f"Failed to log to Langfuse: {e}")
 
         return wrapped_stream()
 

@@ -66,13 +66,34 @@ class OpenAILegacyProvider(LLMProvider):
         )
 
         if stream:
-
+            # For streaming, store usage from the last chunk if available
             def response_generator():
+                last_chunk = None
                 for chunk in response:
                     if chunk.choices[0].delta.content is not None:
                         yield chunk.choices[0].delta.content
+                    last_chunk = chunk
+                # Store usage from the last chunk if available
+                if last_chunk and hasattr(last_chunk, 'usage') and last_chunk.usage:
+                    self._last_usage = {
+                        'prompt_tokens': last_chunk.usage.prompt_tokens if hasattr(last_chunk.usage, 'prompt_tokens') else None,
+                        'completion_tokens': last_chunk.usage.completion_tokens if hasattr(last_chunk.usage, 'completion_tokens') else None,
+                        'total_tokens': last_chunk.usage.total_tokens if hasattr(last_chunk.usage, 'total_tokens') else None,
+                    }
+                else:
+                    self._last_usage = None
 
             return response_generator()
+
+        # Store usage information for non-streaming responses
+        if hasattr(response, 'usage') and response.usage:
+            self._last_usage = {
+                'prompt_tokens': response.usage.prompt_tokens,
+                'completion_tokens': response.usage.completion_tokens,
+                'total_tokens': response.usage.total_tokens,
+            }
+        else:
+            self._last_usage = None
 
         return response.choices[0].message.content
 
@@ -90,13 +111,34 @@ class OpenAILegacyProvider(LLMProvider):
         )
 
         if stream:
-
+            # For streaming, store usage from the last chunk if available
             async def async_response_generator():
+                last_chunk = None
                 async for chunk in response:
                     if chunk.choices[0].delta.content is not None:
                         yield chunk.choices[0].delta.content
+                    last_chunk = chunk
+                # Store usage from the last chunk if available
+                if last_chunk and hasattr(last_chunk, 'usage') and last_chunk.usage:
+                    self._last_usage = {
+                        'prompt_tokens': last_chunk.usage.prompt_tokens if hasattr(last_chunk.usage, 'prompt_tokens') else None,
+                        'completion_tokens': last_chunk.usage.completion_tokens if hasattr(last_chunk.usage, 'completion_tokens') else None,
+                        'total_tokens': last_chunk.usage.total_tokens if hasattr(last_chunk.usage, 'total_tokens') else None,
+                    }
+                else:
+                    self._last_usage = None
 
             return async_response_generator()
+
+        # Store usage information for non-streaming responses
+        if hasattr(response, 'usage') and response.usage:
+            self._last_usage = {
+                'prompt_tokens': response.usage.prompt_tokens,
+                'completion_tokens': response.usage.completion_tokens,
+                'total_tokens': response.usage.total_tokens,
+            }
+        else:
+            self._last_usage = None
 
         return response.choices[0].message.content
 
@@ -170,13 +212,34 @@ class OpenAIProvider(LLMProvider):
         )
 
         if stream:
-
+            # For streaming, store usage from the last chunk if available
             def response_generator():
+                last_chunk = None
                 for chunk in response:
                     if chunk.choices[0].delta.content is not None:
                         yield chunk.choices[0].delta.content
+                    last_chunk = chunk
+                # Store usage from the last chunk if available
+                if last_chunk and hasattr(last_chunk, 'usage') and last_chunk.usage:
+                    self._last_usage = {
+                        'prompt_tokens': last_chunk.usage.prompt_tokens if hasattr(last_chunk.usage, 'prompt_tokens') else None,
+                        'completion_tokens': last_chunk.usage.completion_tokens if hasattr(last_chunk.usage, 'completion_tokens') else None,
+                        'total_tokens': last_chunk.usage.total_tokens if hasattr(last_chunk.usage, 'total_tokens') else None,
+                    }
+                else:
+                    self._last_usage = None
 
             return response_generator()
+
+        # Store usage information for non-streaming responses
+        if hasattr(response, 'usage') and response.usage:
+            self._last_usage = {
+                'prompt_tokens': response.usage.prompt_tokens,
+                'completion_tokens': response.usage.completion_tokens,
+                'total_tokens': response.usage.total_tokens,
+            }
+        else:
+            self._last_usage = None
 
         return response.choices[0].message.content
 
@@ -194,12 +257,33 @@ class OpenAIProvider(LLMProvider):
         )
 
         if stream:
-
+            # For streaming, store usage from the last chunk if available
             async def async_response_generator():
+                last_chunk = None
                 async for chunk in response:
                     if chunk.choices[0].delta.content is not None:
                         yield chunk.choices[0].delta.content
+                    last_chunk = chunk
+                # Store usage from the last chunk if available
+                if last_chunk and hasattr(last_chunk, 'usage') and last_chunk.usage:
+                    self._last_usage = {
+                        'prompt_tokens': last_chunk.usage.prompt_tokens if hasattr(last_chunk.usage, 'prompt_tokens') else None,
+                        'completion_tokens': last_chunk.usage.completion_tokens if hasattr(last_chunk.usage, 'completion_tokens') else None,
+                        'total_tokens': last_chunk.usage.total_tokens if hasattr(last_chunk.usage, 'total_tokens') else None,
+                    }
+                else:
+                    self._last_usage = None
 
             return async_response_generator()
+
+        # Store usage information for non-streaming responses
+        if hasattr(response, 'usage') and response.usage:
+            self._last_usage = {
+                'prompt_tokens': response.usage.prompt_tokens,
+                'completion_tokens': response.usage.completion_tokens,
+                'total_tokens': response.usage.total_tokens,
+            }
+        else:
+            self._last_usage = None
 
         return response.choices[0].message.content

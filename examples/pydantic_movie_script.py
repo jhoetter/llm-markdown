@@ -1,5 +1,6 @@
 from llm_markdown import llm
 from llm_markdown.providers.openai import OpenAILegacyProvider
+from llm_markdown.providers.langfuse import LangfuseWrapper
 from dotenv import load_dotenv
 from pydantic import BaseModel
 import os
@@ -11,6 +12,14 @@ openai_provider = OpenAILegacyProvider(
     api_key=os.getenv("OPENAI_API_KEY"),
     model="gpt-4o-mini",
     max_tokens=4096,
+)
+
+# Wrap with Langfuse for logging and cost tracking
+langfuse_provider = LangfuseWrapper(
+    provider=openai_provider,
+    secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+    public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+    host=os.getenv("LANGFUSE_HOST"),
 )
 
 
@@ -29,7 +38,8 @@ class ReviewAnalysis(BaseModel):
 
 
 # Define a function that uses the LLM provider and write the prompt as a formatted markdown string
-@llm(provider=openai_provider)
+# Add langfuse_metadata for categorization - you can filter by "category": "movie-reviews" in Langfuse dashboard
+@llm(provider=langfuse_provider, langfuse_metadata={"category": "movie-reviews", "use_case": "sentiment-analysis"})
 def analyze_movie_review(review: MovieReview) -> ReviewAnalysis:
     f"""
     Analyze the movie review and provide:

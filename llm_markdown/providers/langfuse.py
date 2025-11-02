@@ -29,6 +29,7 @@ class LangfuseWrapper(LLMProvider):
         os.environ["LANGFUSE_PUBLIC_KEY"] = public_key
         os.environ["LANGFUSE_HOST"] = host
         self.langfuse = get_client()
+        self._request_metadata = {}  # Store metadata for the current request
 
     def _process_base64_image(self, data_uri: str) -> LangfuseMedia:
         """
@@ -90,6 +91,16 @@ class LangfuseWrapper(LLMProvider):
 
         return sanitized
 
+    def set_request_metadata(self, metadata: dict):
+        """
+        Set metadata for the next request. This is called by the llm decorator
+        to pass metadata like categories for filtering in Langfuse.
+        
+        Args:
+            metadata: Dictionary with metadata to include in Langfuse generation
+        """
+        self._request_metadata = metadata or {}
+
     def query(
         self, messages: list[dict], stream: bool = False
     ) -> Union[str, Iterator[str]]:
@@ -121,6 +132,10 @@ class LangfuseWrapper(LLMProvider):
                 if model != "unknown":
                     gen_kwargs["model"] = model
                 
+                # Add metadata if provided (for filtering/categorization)
+                if self._request_metadata:
+                    gen_kwargs["metadata"] = self._request_metadata
+                
                 # Add usage info if available for cost tracking
                 if usage and usage.get("total_tokens"):
                     gen_kwargs["usage_details"] = {
@@ -131,8 +146,12 @@ class LangfuseWrapper(LLMProvider):
                 
                 gen = self.langfuse.start_generation(**gen_kwargs)
                 gen.end()
+                
+                # Clear metadata after use
+                self._request_metadata = {}
             except Exception as e:
                 logger.warning(f"Failed to log to Langfuse: {e}")
+                self._request_metadata = {}
             
             return response
 
@@ -158,6 +177,10 @@ class LangfuseWrapper(LLMProvider):
                 if model != "unknown":
                     gen_kwargs["model"] = model
                 
+                # Add metadata if provided (for filtering/categorization)
+                if self._request_metadata:
+                    gen_kwargs["metadata"] = self._request_metadata
+                
                 # Add usage info if available for cost tracking
                 if usage and usage.get("total_tokens"):
                     gen_kwargs["usage_details"] = {
@@ -168,8 +191,12 @@ class LangfuseWrapper(LLMProvider):
                 
                 gen = self.langfuse.start_generation(**gen_kwargs)
                 gen.end()
+                
+                # Clear metadata after use
+                self._request_metadata = {}
             except Exception as e:
                 logger.warning(f"Failed to log to Langfuse: {e}")
+                self._request_metadata = {}
 
         return wrapped_stream()
 
@@ -204,6 +231,10 @@ class LangfuseWrapper(LLMProvider):
                 if model != "unknown":
                     gen_kwargs["model"] = model
                 
+                # Add metadata if provided (for filtering/categorization)
+                if self._request_metadata:
+                    gen_kwargs["metadata"] = self._request_metadata
+                
                 # Add usage info if available for cost tracking
                 if usage and usage.get("total_tokens"):
                     gen_kwargs["usage_details"] = {
@@ -214,8 +245,12 @@ class LangfuseWrapper(LLMProvider):
                 
                 gen = self.langfuse.start_generation(**gen_kwargs)
                 gen.end()
+                
+                # Clear metadata after use
+                self._request_metadata = {}
             except Exception as e:
                 logger.warning(f"Failed to log to Langfuse: {e}")
+                self._request_metadata = {}
             
             return response
 
@@ -241,6 +276,10 @@ class LangfuseWrapper(LLMProvider):
                 if model != "unknown":
                     gen_kwargs["model"] = model
                 
+                # Add metadata if provided (for filtering/categorization)
+                if self._request_metadata:
+                    gen_kwargs["metadata"] = self._request_metadata
+                
                 # Add usage info if available for cost tracking
                 if usage and usage.get("total_tokens"):
                     gen_kwargs["usage_details"] = {
@@ -251,8 +290,12 @@ class LangfuseWrapper(LLMProvider):
                 
                 gen = self.langfuse.start_generation(**gen_kwargs)
                 gen.end()
+                
+                # Clear metadata after use
+                self._request_metadata = {}
             except Exception as e:
                 logger.warning(f"Failed to log to Langfuse: {e}")
+                self._request_metadata = {}
 
         return wrapped_stream()
 

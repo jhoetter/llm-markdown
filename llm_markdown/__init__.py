@@ -46,10 +46,17 @@ def get_base64_image(input_data: str) -> str:
 
 
 class llm:
-    def __init__(self, provider, reasoning_first: bool = True, stream: bool = False):
+    def __init__(
+        self,
+        provider,
+        reasoning_first: bool = True,
+        stream: bool = False,
+        langfuse_metadata: dict = None,
+    ):
         self.provider = provider
         self.reasoning_first = reasoning_first
         self.stream = stream
+        self.langfuse_metadata = langfuse_metadata or {}
 
     def get_system_instructions(self, return_type) -> str:
         """Generate appropriate system instructions based on return type."""
@@ -237,6 +244,10 @@ class llm:
 
                 messages.append({"role": "user", "content": user_msg})
 
+                # Set metadata on LangfuseWrapper if it's being used
+                if hasattr(self.provider, "set_request_metadata"):
+                    self.provider.set_request_metadata(self.langfuse_metadata)
+
                 # Query the provider - use await for async
                 raw_response = await self.provider.query_async(
                     messages, stream=self.stream
@@ -396,6 +407,10 @@ class llm:
                     user_msg = content if len(content) > 1 else content[0]["text"]
 
                 messages.append({"role": "user", "content": user_msg})
+
+                # Set metadata on LangfuseWrapper if it's being used
+                if hasattr(self.provider, "set_request_metadata"):
+                    self.provider.set_request_metadata(self.langfuse_metadata)
 
                 # Query the provider
                 raw_response = self.provider.query(messages, stream=self.stream)

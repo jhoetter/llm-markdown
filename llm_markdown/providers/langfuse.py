@@ -144,7 +144,7 @@ class LangfuseWrapper(LLMProvider):
                         "total_tokens": usage.get("total_tokens", 0),
                     }
                 
-                gen = self.langfuse.start_generation(**gen_kwargs)
+                gen = self.langfuse.start_observation(as_type='generation', **gen_kwargs)
                 gen.end()
                 
                 # Clear metadata after use
@@ -189,7 +189,7 @@ class LangfuseWrapper(LLMProvider):
                         "total_tokens": usage.get("total_tokens", 0),
                     }
                 
-                gen = self.langfuse.start_generation(**gen_kwargs)
+                gen = self.langfuse.start_observation(as_type='generation', **gen_kwargs)
                 gen.end()
                 
                 # Clear metadata after use
@@ -243,7 +243,7 @@ class LangfuseWrapper(LLMProvider):
                         "total_tokens": usage.get("total_tokens", 0),
                     }
                 
-                gen = self.langfuse.start_generation(**gen_kwargs)
+                gen = self.langfuse.start_observation(as_type='generation', **gen_kwargs)
                 gen.end()
                 
                 # Clear metadata after use
@@ -288,7 +288,7 @@ class LangfuseWrapper(LLMProvider):
                         "total_tokens": usage.get("total_tokens", 0),
                     }
                 
-                gen = self.langfuse.start_generation(**gen_kwargs)
+                gen = self.langfuse.start_observation(as_type='generation', **gen_kwargs)
                 gen.end()
                 
                 # Clear metadata after use

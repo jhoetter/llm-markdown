@@ -52,14 +52,270 @@ class llm:
         reasoning_first: bool = True,
         stream: bool = False,
         langfuse_metadata: dict = None,
+        max_retries: int = 2,
     ):
         self.provider = provider
         self.reasoning_first = reasoning_first
         self.stream = stream
         self.langfuse_metadata = langfuse_metadata or {}
+        self.max_retries = max_retries
 
-    def get_system_instructions(self, return_type) -> str:
+    def _make_schema_strict(self, schema: dict) -> dict:
+        """
+        Recursively add 'additionalProperties: false' to all object types in a schema.
+
+        OpenAI's strict mode requires this for all object types in the schema.
+        Also handles $defs for nested Pydantic models.
+        """
+        if not isinstance(schema, dict):
+            return schema
+
+        result = schema.copy()
+
+        # If this is an object type, add additionalProperties: false
+        if result.get("type") == "object":
+            result["additionalProperties"] = False
+            # Recursively process properties
+            if "properties" in result:
+                result["properties"] = {
+                    k: self._make_schema_strict(v)
+                    for k, v in result["properties"].items()
+                }
+
+        # Handle arrays
+        if result.get("type") == "array" and "items" in result:
+            result["items"] = self._make_schema_strict(result["items"])
+
+        # Handle $defs (Pydantic puts nested model definitions here)
+        if "$defs" in result:
+            result["$defs"] = {
+                k: self._make_schema_strict(v) for k, v in result["$defs"].items()
+            }
+
+        # Handle allOf, anyOf, oneOf
+        for key in ["allOf", "anyOf", "oneOf"]:
+            if key in result:
+                result[key] = [self._make_schema_strict(s) for s in result[key]]
+
+        return result
+
+    def _build_structured_schema(self, return_type) -> dict:
+        """
+        Build JSON schema for structured output with reasoning.
+
+        Creates a schema that wraps the return type with a reasoning field,
+        suitable for use with OpenAI's response_format json_schema.
+        """
+        # Initialize $defs to potentially hoist from answer schema
+        hoisted_defs = {}
+
+        # Get answer schema based on return type
+        if return_type is None:
+            answer_schema = {"type": "string"}
+        elif get_origin(return_type) is not None:
+            # Handle typing annotations (List, Dict, etc)
+            origin = get_origin(return_type)
+            if origin in (list, List):
+                answer_schema = {"type": "array", "items": {"type": "string"}}
+            elif origin in (dict, Dict):
+                answer_schema = {"type": "object", "additionalProperties": False}
+            else:
+                answer_schema = {"type": "string"}
+        else:
+            try:
+                if issubclass(return_type, BaseModel):
+                    # Get Pydantic model schema and make it strict for OpenAI
+                    answer_schema = self._make_schema_strict(
+                        return_type.model_json_schema()
+                    )
+                    # Hoist $defs to root level (OpenAI requires $refs to work from root)
+                    if "$defs" in answer_schema:
+                        hoisted_defs = answer_schema.pop("$defs")
+                elif return_type == str:
+                    answer_schema = {"type": "string"}
+                elif return_type == int:
+                    answer_schema = {"type": "integer"}
+                elif return_type == float:
+                    answer_schema = {"type": "number"}
+                elif return_type == bool:
+                    answer_schema = {"type": "boolean"}
+                else:
+                    answer_schema = {"type": "string"}
+            except TypeError:
+                answer_schema = {"type": "string"}
+
+        # Wrap with reasoning
+        result = {
+            "type": "object",
+            "properties": {
+                "reasoning": {
+                    "type": "string",
+                    "description": "Step-by-step reasoning process",
+                },
+                "answer": answer_schema,
+            },
+            "required": ["reasoning", "answer"],
+            "additionalProperties": False,
+        }
+
+        # Add hoisted $defs at root level if any
+        if hoisted_defs:
+            result["$defs"] = hoisted_defs
+
+        return result
+
+    def _get_structured_system_instructions(self, return_type) -> str:
+        """Generate simpler system instructions for structured output mode."""
+        if return_type is None:
+            return """You are a helpful assistant. You will respond with JSON.
+Include your reasoning in the 'reasoning' field and your answer in the 'answer' field."""
+
+        try:
+            if get_origin(return_type) is None and issubclass(return_type, BaseModel):
+                schema = return_type.model_json_schema()
+                return f"""You are a helpful assistant. You will respond with JSON.
+The 'reasoning' field should contain your step-by-step thought process.
+The 'answer' field must be a valid JSON object matching this schema: {json.dumps(schema)}"""
+        except TypeError:
+            pass
+
+        return """You are a helpful assistant. You will respond with JSON.
+Include your reasoning in the 'reasoning' field and your answer in the 'answer' field."""
+
+    def _parse_answer(self, answer, return_type):
+        """Parse the answer into the expected return type."""
+        if return_type is None:
+            return answer
+
+        # Handle typing annotations (List, Dict, etc)
+        if get_origin(return_type) is not None:
+            if isinstance(answer, str):
+                return self.cast_type(answer, return_type)
+            return answer
+
+        try:
+            if issubclass(return_type, BaseModel):
+                # Handle Pydantic models
+                if isinstance(answer, dict):
+                    data = answer
+                elif isinstance(answer, str):
+                    # Try to extract JSON if it's a string
+                    if not answer.strip().startswith("{"):
+                        json_match = re.search(r"\{.*\}", answer, re.DOTALL)
+                        if json_match:
+                            answer = json_match.group(0)
+                        else:
+                            raise ValueError(
+                                "Could not find JSON-like content in response"
+                            )
+                    data = json.loads(answer)
+                else:
+                    data = answer
+
+                return return_type.model_validate(data)
+        except TypeError:
+            pass
+
+        # Handle primitive types
+        if isinstance(answer, str):
+            return self.cast_type(answer, return_type)
+        return answer
+
+    def _get_correction_prompt(self) -> str:
+        """Get the correction prompt for self-healing retry."""
+        return """Your response was missing the required XML tags.
+Please provide your COMPLETE response using EXACTLY this structure:
+
+<reasoning>
+Your step-by-step thinking here.
+</reasoning>
+<answer>
+Your final answer here (JSON if returning an object).
+</answer>
+
+Start with <reasoning> and end with </answer>. No other text."""
+
+    def _query_with_xml_fallback(self, messages: list, return_type) -> Any:
+        """
+        XML extraction with self-healing retry.
+
+        Tries to extract reasoning and answer tags from the response.
+        If extraction fails, retries with a correction prompt.
+        """
+        last_error = None
+        working_messages = messages.copy()
+
+        for attempt in range(self.max_retries + 1):
+            raw_response = self.provider.query(working_messages, stream=False)
+            raw_response = raw_response.strip()
+            logger.debug(f"Raw LLM response (attempt {attempt + 1}):\n{raw_response}")
+
+            try:
+                reasoning = self.extract_tag(raw_response, "reasoning")
+                logger.debug(f"Extracted reasoning:\n{reasoning}")
+                answer = self.extract_tag(raw_response, "answer")
+                logger.debug(f"Extracted answer:\n{answer}")
+                logger.debug(f"XML extraction succeeded on attempt {attempt + 1}")
+                return self._parse_answer(answer, return_type)
+
+            except ValueError as e:
+                last_error = e
+                logger.warning(f"XML extraction failed (attempt {attempt + 1}): {e}")
+
+                if attempt < self.max_retries:
+                    # Self-healing: add correction prompt
+                    working_messages.append(
+                        {"role": "assistant", "content": raw_response}
+                    )
+                    working_messages.append(
+                        {"role": "user", "content": self._get_correction_prompt()}
+                    )
+
+        raise last_error
+
+    async def _query_with_xml_fallback_async(self, messages: list, return_type) -> Any:
+        """
+        Async version of XML extraction with self-healing retry.
+        """
+        last_error = None
+        working_messages = messages.copy()
+
+        for attempt in range(self.max_retries + 1):
+            raw_response = await self.provider.query_async(
+                working_messages, stream=False
+            )
+            raw_response = raw_response.strip()
+            logger.debug(f"Raw LLM response (attempt {attempt + 1}):\n{raw_response}")
+
+            try:
+                reasoning = self.extract_tag(raw_response, "reasoning")
+                logger.debug(f"Extracted reasoning:\n{reasoning}")
+                answer = self.extract_tag(raw_response, "answer")
+                logger.debug(f"Extracted answer:\n{answer}")
+                logger.debug(f"XML extraction succeeded on attempt {attempt + 1}")
+                return self._parse_answer(answer, return_type)
+
+            except ValueError as e:
+                last_error = e
+                logger.warning(f"XML extraction failed (attempt {attempt + 1}): {e}")
+
+                if attempt < self.max_retries:
+                    # Self-healing: add correction prompt
+                    working_messages.append(
+                        {"role": "assistant", "content": raw_response}
+                    )
+                    working_messages.append(
+                        {"role": "user", "content": self._get_correction_prompt()}
+                    )
+
+        raise last_error
+
+    def get_system_instructions(self, return_type, use_structured: bool = False) -> str:
         """Generate appropriate system instructions based on return type."""
+        # For structured output mode, use simpler instructions
+        if use_structured:
+            return self._get_structured_system_instructions(return_type)
+
         if not return_type:
             return "You are a helpful assistant."
 
@@ -248,83 +504,56 @@ class llm:
                 if hasattr(self.provider, "set_request_metadata"):
                     self.provider.set_request_metadata(self.langfuse_metadata)
 
-                # Query the provider - use await for async
-                raw_response = await self.provider.query_async(
-                    messages, stream=self.stream
-                )
-
+                # Handle streaming separately (no structured output for streaming)
                 if self.stream:
-                    # For streaming, return the generator directly
+                    raw_response = await self.provider.query_async(
+                        messages, stream=True
+                    )
                     return raw_response
 
-                # Non-streaming logic remains the same
+                # PRIMARY PATH: Try structured output first if reasoning_first and provider supports it
+                if self.reasoning_first and self.provider.supports_structured_output():
+                    try:
+                        schema = self._build_structured_schema(return_type)
+                        # Use structured system instructions
+                        structured_messages = [
+                            {
+                                "role": "system",
+                                "content": self._get_structured_system_instructions(
+                                    return_type
+                                ),
+                            },
+                            {"role": "user", "content": user_msg},
+                        ]
+
+                        result = await self.provider.query_structured_async(
+                            structured_messages, schema
+                        )
+                        reasoning = result.get("reasoning", "")
+                        answer = result.get("answer")
+                        logger.debug(f"Structured output reasoning: {reasoning}")
+                        logger.debug(f"Structured output answer: {answer}")
+
+                        return self._parse_answer(answer, return_type)
+
+                    except Exception as e:
+                        logger.warning(
+                            f"Structured output failed, falling back to XML: {e}"
+                        )
+                        # Fall through to XML fallback path
+
+                # FALLBACK PATH: XML tags with self-healing (or primary if no structured output support)
+                if self.reasoning_first:
+                    return await self._query_with_xml_fallback_async(
+                        messages, return_type
+                    )
+
+                # No reasoning required, just query directly
+                raw_response = await self.provider.query_async(messages, stream=False)
                 raw_response = raw_response.strip()
                 logger.debug(f"Raw LLM response:\n{raw_response}")
 
-                if self.reasoning_first:
-                    reasoning = self.extract_tag(raw_response, "reasoning")
-                    logger.debug(f"Extracted reasoning:\n{reasoning}")
-                    answer = self.extract_tag(raw_response, "answer")
-                    logger.debug(f"Extracted answer:\n{answer}")
-                else:
-                    answer = raw_response
-
-                # Validate and cast the extracted answer
-                if return_type:
-                    if get_origin(return_type) is not None:
-                        # Handle typing annotations (List, Dict, etc)
-                        return self.cast_type(answer, return_type)
-                    try:
-                        if issubclass(return_type, BaseModel):
-                            # Handle Pydantic models
-                            try:
-                                # Attempt to extract JSON content if not well-formed
-                                if not answer.strip().startswith("{"):
-                                    logger.warning(
-                                        f"Response doesn't look like JSON, attempting to fix:\n{answer}"
-                                    )
-                                    json_match = re.search(r"\{.*\}", answer, re.DOTALL)
-                                    if json_match:
-                                        answer = json_match.group(0)
-                                        logger.debug(
-                                            f"Extracted JSON-like content:\n{answer}"
-                                        )
-                                    else:
-                                        raise ValueError(
-                                            "Could not find JSON-like content in response"
-                                        )
-
-                                # Parse the JSON to a dictionary so we can do post-processing
-                                data = json.loads(answer)
-
-                                # Example: rename "overall_sentiment" to "sentiment" if needed
-                                if (
-                                    "overall_sentiment" in data
-                                    and "sentiment" not in data
-                                ):
-                                    logger.info(
-                                        "Renaming 'overall_sentiment' to 'sentiment'."
-                                    )
-                                    data["sentiment"] = data.pop("overall_sentiment")
-
-                                # Now parse into the Pydantic model
-                                return return_type.model_validate(data)
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to parse response as {return_type.__name__}: {e}"
-                                )
-                                logger.error(f"Raw response was:\n{answer}")
-                                raise ValueError(
-                                    f"LLM response could not be parsed as {return_type.__name__}. "
-                                    f"Ensure the prompt requests a JSON response matching the model structure. "
-                                    f"Error: {str(e)}"
-                                ) from e
-                    except TypeError:
-                        # Handle primitive types
-                        return self.cast_type(answer, return_type)
-
-                # No return type specified
-                return answer
+                return self._parse_answer(raw_response, return_type)
 
             return async_wrapper
         else:
@@ -412,81 +641,52 @@ class llm:
                 if hasattr(self.provider, "set_request_metadata"):
                     self.provider.set_request_metadata(self.langfuse_metadata)
 
-                # Query the provider
-                raw_response = self.provider.query(messages, stream=self.stream)
-
+                # Handle streaming separately (no structured output for streaming)
                 if self.stream:
-                    # For streaming, return the generator directly
+                    raw_response = self.provider.query(messages, stream=True)
                     return raw_response
 
-                # Non-streaming logic remains the same
+                # PRIMARY PATH: Try structured output first if reasoning_first and provider supports it
+                if self.reasoning_first and self.provider.supports_structured_output():
+                    try:
+                        schema = self._build_structured_schema(return_type)
+                        # Use structured system instructions
+                        structured_messages = [
+                            {
+                                "role": "system",
+                                "content": self._get_structured_system_instructions(
+                                    return_type
+                                ),
+                            },
+                            {"role": "user", "content": user_msg},
+                        ]
+
+                        result = self.provider.query_structured(
+                            structured_messages, schema
+                        )
+                        reasoning = result.get("reasoning", "")
+                        answer = result.get("answer")
+                        logger.debug(f"Structured output reasoning: {reasoning}")
+                        logger.debug(f"Structured output answer: {answer}")
+
+                        return self._parse_answer(answer, return_type)
+
+                    except Exception as e:
+                        logger.warning(
+                            f"Structured output failed, falling back to XML: {e}"
+                        )
+                        # Fall through to XML fallback path
+
+                # FALLBACK PATH: XML tags with self-healing (or primary if no structured output support)
+                if self.reasoning_first:
+                    return self._query_with_xml_fallback(messages, return_type)
+
+                # No reasoning required, just query directly
+                raw_response = self.provider.query(messages, stream=False)
                 raw_response = raw_response.strip()
                 logger.debug(f"Raw LLM response:\n{raw_response}")
 
-                if self.reasoning_first:
-                    reasoning = self.extract_tag(raw_response, "reasoning")
-                    logger.debug(f"Extracted reasoning:\n{reasoning}")
-                    answer = self.extract_tag(raw_response, "answer")
-                    logger.debug(f"Extracted answer:\n{answer}")
-                else:
-                    answer = raw_response
-
-                # Validate and cast the extracted answer
-                if return_type:
-                    if get_origin(return_type) is not None:
-                        # Handle typing annotations (List, Dict, etc)
-                        return self.cast_type(answer, return_type)
-                    try:
-                        if issubclass(return_type, BaseModel):
-                            # Handle Pydantic models
-                            try:
-                                # Attempt to extract JSON content if not well-formed
-                                if not answer.strip().startswith("{"):
-                                    logger.warning(
-                                        f"Response doesn't look like JSON, attempting to fix:\n{answer}"
-                                    )
-                                    json_match = re.search(r"\{.*\}", answer, re.DOTALL)
-                                    if json_match:
-                                        answer = json_match.group(0)
-                                        logger.debug(
-                                            f"Extracted JSON-like content:\n{answer}"
-                                        )
-                                    else:
-                                        raise ValueError(
-                                            "Could not find JSON-like content in response"
-                                        )
-
-                                # Parse the JSON to a dictionary so we can do post-processing
-                                data = json.loads(answer)
-
-                                # Example: rename "overall_sentiment" to "sentiment" if needed
-                                if (
-                                    "overall_sentiment" in data
-                                    and "sentiment" not in data
-                                ):
-                                    logger.info(
-                                        "Renaming 'overall_sentiment' to 'sentiment'."
-                                    )
-                                    data["sentiment"] = data.pop("overall_sentiment")
-
-                                # Now parse into the Pydantic model
-                                return return_type.model_validate(data)
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to parse response as {return_type.__name__}: {e}"
-                                )
-                                logger.error(f"Raw response was:\n{answer}")
-                                raise ValueError(
-                                    f"LLM response could not be parsed as {return_type.__name__}. "
-                                    f"Ensure the prompt requests a JSON response matching the model structure. "
-                                    f"Error: {str(e)}"
-                                ) from e
-                    except TypeError:
-                        # Handle primitive types
-                        return self.cast_type(answer, return_type)
-
-                # No return type specified
-                return answer
+                return self._parse_answer(raw_response, return_type)
 
             return wrapper
 

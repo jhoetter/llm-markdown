@@ -1,3 +1,4 @@
+import json
 import openai
 from .base import LLMProvider
 from typing import Union, Iterator, AsyncIterator
@@ -74,11 +75,23 @@ class OpenAILegacyProvider(LLMProvider):
                         yield chunk.choices[0].delta.content
                     last_chunk = chunk
                 # Store usage from the last chunk if available
-                if last_chunk and hasattr(last_chunk, 'usage') and last_chunk.usage:
+                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
                     self._last_usage = {
-                        'prompt_tokens': last_chunk.usage.prompt_tokens if hasattr(last_chunk.usage, 'prompt_tokens') else None,
-                        'completion_tokens': last_chunk.usage.completion_tokens if hasattr(last_chunk.usage, 'completion_tokens') else None,
-                        'total_tokens': last_chunk.usage.total_tokens if hasattr(last_chunk.usage, 'total_tokens') else None,
+                        "prompt_tokens": (
+                            last_chunk.usage.prompt_tokens
+                            if hasattr(last_chunk.usage, "prompt_tokens")
+                            else None
+                        ),
+                        "completion_tokens": (
+                            last_chunk.usage.completion_tokens
+                            if hasattr(last_chunk.usage, "completion_tokens")
+                            else None
+                        ),
+                        "total_tokens": (
+                            last_chunk.usage.total_tokens
+                            if hasattr(last_chunk.usage, "total_tokens")
+                            else None
+                        ),
                     }
                 else:
                     self._last_usage = None
@@ -86,11 +99,11 @@ class OpenAILegacyProvider(LLMProvider):
             return response_generator()
 
         # Store usage information for non-streaming responses
-        if hasattr(response, 'usage') and response.usage:
+        if hasattr(response, "usage") and response.usage:
             self._last_usage = {
-                'prompt_tokens': response.usage.prompt_tokens,
-                'completion_tokens': response.usage.completion_tokens,
-                'total_tokens': response.usage.total_tokens,
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
             }
         else:
             self._last_usage = None
@@ -119,11 +132,23 @@ class OpenAILegacyProvider(LLMProvider):
                         yield chunk.choices[0].delta.content
                     last_chunk = chunk
                 # Store usage from the last chunk if available
-                if last_chunk and hasattr(last_chunk, 'usage') and last_chunk.usage:
+                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
                     self._last_usage = {
-                        'prompt_tokens': last_chunk.usage.prompt_tokens if hasattr(last_chunk.usage, 'prompt_tokens') else None,
-                        'completion_tokens': last_chunk.usage.completion_tokens if hasattr(last_chunk.usage, 'completion_tokens') else None,
-                        'total_tokens': last_chunk.usage.total_tokens if hasattr(last_chunk.usage, 'total_tokens') else None,
+                        "prompt_tokens": (
+                            last_chunk.usage.prompt_tokens
+                            if hasattr(last_chunk.usage, "prompt_tokens")
+                            else None
+                        ),
+                        "completion_tokens": (
+                            last_chunk.usage.completion_tokens
+                            if hasattr(last_chunk.usage, "completion_tokens")
+                            else None
+                        ),
+                        "total_tokens": (
+                            last_chunk.usage.total_tokens
+                            if hasattr(last_chunk.usage, "total_tokens")
+                            else None
+                        ),
                     }
                 else:
                     self._last_usage = None
@@ -131,16 +156,96 @@ class OpenAILegacyProvider(LLMProvider):
             return async_response_generator()
 
         # Store usage information for non-streaming responses
-        if hasattr(response, 'usage') and response.usage:
+        if hasattr(response, "usage") and response.usage:
             self._last_usage = {
-                'prompt_tokens': response.usage.prompt_tokens,
-                'completion_tokens': response.usage.completion_tokens,
-                'total_tokens': response.usage.total_tokens,
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
             }
         else:
             self._last_usage = None
 
         return response.choices[0].message.content
+
+    def supports_structured_output(self) -> bool:
+        """OpenAI Legacy provider supports structured output via response_format."""
+        return True
+
+    def query_structured(self, messages: list[dict], schema: dict) -> dict:
+        """
+        Use OpenAI's strict JSON schema mode for guaranteed structured output.
+
+        Args:
+            messages: Chat messages
+            schema: JSON Schema for the expected output structure
+
+        Returns:
+            Parsed JSON response as dict
+        """
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=self.max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        )
+
+        # Store usage information
+        if hasattr(response, "usage") and response.usage:
+            self._last_usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+        else:
+            self._last_usage = None
+
+        content = response.choices[0].message.content
+        return json.loads(content)
+
+    async def query_structured_async(self, messages: list[dict], schema: dict) -> dict:
+        """
+        Async version using OpenAI's strict JSON schema mode.
+
+        Args:
+            messages: Chat messages
+            schema: JSON Schema for the expected output structure
+
+        Returns:
+            Parsed JSON response as dict
+        """
+        response = await self.async_client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=self.max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        )
+
+        # Store usage information
+        if hasattr(response, "usage") and response.usage:
+            self._last_usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+        else:
+            self._last_usage = None
+
+        content = response.choices[0].message.content
+        return json.loads(content)
 
 
 class OpenAIProvider(LLMProvider):
@@ -220,11 +325,23 @@ class OpenAIProvider(LLMProvider):
                         yield chunk.choices[0].delta.content
                     last_chunk = chunk
                 # Store usage from the last chunk if available
-                if last_chunk and hasattr(last_chunk, 'usage') and last_chunk.usage:
+                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
                     self._last_usage = {
-                        'prompt_tokens': last_chunk.usage.prompt_tokens if hasattr(last_chunk.usage, 'prompt_tokens') else None,
-                        'completion_tokens': last_chunk.usage.completion_tokens if hasattr(last_chunk.usage, 'completion_tokens') else None,
-                        'total_tokens': last_chunk.usage.total_tokens if hasattr(last_chunk.usage, 'total_tokens') else None,
+                        "prompt_tokens": (
+                            last_chunk.usage.prompt_tokens
+                            if hasattr(last_chunk.usage, "prompt_tokens")
+                            else None
+                        ),
+                        "completion_tokens": (
+                            last_chunk.usage.completion_tokens
+                            if hasattr(last_chunk.usage, "completion_tokens")
+                            else None
+                        ),
+                        "total_tokens": (
+                            last_chunk.usage.total_tokens
+                            if hasattr(last_chunk.usage, "total_tokens")
+                            else None
+                        ),
                     }
                 else:
                     self._last_usage = None
@@ -232,11 +349,11 @@ class OpenAIProvider(LLMProvider):
             return response_generator()
 
         # Store usage information for non-streaming responses
-        if hasattr(response, 'usage') and response.usage:
+        if hasattr(response, "usage") and response.usage:
             self._last_usage = {
-                'prompt_tokens': response.usage.prompt_tokens,
-                'completion_tokens': response.usage.completion_tokens,
-                'total_tokens': response.usage.total_tokens,
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
             }
         else:
             self._last_usage = None
@@ -265,11 +382,23 @@ class OpenAIProvider(LLMProvider):
                         yield chunk.choices[0].delta.content
                     last_chunk = chunk
                 # Store usage from the last chunk if available
-                if last_chunk and hasattr(last_chunk, 'usage') and last_chunk.usage:
+                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
                     self._last_usage = {
-                        'prompt_tokens': last_chunk.usage.prompt_tokens if hasattr(last_chunk.usage, 'prompt_tokens') else None,
-                        'completion_tokens': last_chunk.usage.completion_tokens if hasattr(last_chunk.usage, 'completion_tokens') else None,
-                        'total_tokens': last_chunk.usage.total_tokens if hasattr(last_chunk.usage, 'total_tokens') else None,
+                        "prompt_tokens": (
+                            last_chunk.usage.prompt_tokens
+                            if hasattr(last_chunk.usage, "prompt_tokens")
+                            else None
+                        ),
+                        "completion_tokens": (
+                            last_chunk.usage.completion_tokens
+                            if hasattr(last_chunk.usage, "completion_tokens")
+                            else None
+                        ),
+                        "total_tokens": (
+                            last_chunk.usage.total_tokens
+                            if hasattr(last_chunk.usage, "total_tokens")
+                            else None
+                        ),
                     }
                 else:
                     self._last_usage = None
@@ -277,13 +406,93 @@ class OpenAIProvider(LLMProvider):
             return async_response_generator()
 
         # Store usage information for non-streaming responses
-        if hasattr(response, 'usage') and response.usage:
+        if hasattr(response, "usage") and response.usage:
             self._last_usage = {
-                'prompt_tokens': response.usage.prompt_tokens,
-                'completion_tokens': response.usage.completion_tokens,
-                'total_tokens': response.usage.total_tokens,
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
             }
         else:
             self._last_usage = None
 
         return response.choices[0].message.content
+
+    def supports_structured_output(self) -> bool:
+        """OpenAI provider supports structured output via response_format."""
+        return True
+
+    def query_structured(self, messages: list[dict], schema: dict) -> dict:
+        """
+        Use OpenAI's strict JSON schema mode for guaranteed structured output.
+
+        Args:
+            messages: Chat messages
+            schema: JSON Schema for the expected output structure
+
+        Returns:
+            Parsed JSON response as dict
+        """
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_completion_tokens=self.max_completion_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        )
+
+        # Store usage information
+        if hasattr(response, "usage") and response.usage:
+            self._last_usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+        else:
+            self._last_usage = None
+
+        content = response.choices[0].message.content
+        return json.loads(content)
+
+    async def query_structured_async(self, messages: list[dict], schema: dict) -> dict:
+        """
+        Async version using OpenAI's strict JSON schema mode.
+
+        Args:
+            messages: Chat messages
+            schema: JSON Schema for the expected output structure
+
+        Returns:
+            Parsed JSON response as dict
+        """
+        response = await self.async_client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_completion_tokens=self.max_completion_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        )
+
+        # Store usage information
+        if hasattr(response, "usage") and response.usage:
+            self._last_usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+        else:
+            self._last_usage = None
+
+        content = response.choices[0].message.content
+        return json.loads(content)

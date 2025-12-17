@@ -62,9 +62,12 @@ class llm:
 
     def _make_schema_strict(self, schema: dict) -> dict:
         """
-        Recursively add 'additionalProperties: false' to all object types in a schema.
+        Make a JSON schema compatible with OpenAI's strict mode.
 
-        OpenAI's strict mode requires this for all object types in the schema.
+        OpenAI's strict mode requires:
+        1. 'additionalProperties: false' on all object types
+        2. 'required' must include ALL keys from 'properties'
+
         Also handles $defs for nested Pydantic models.
         """
         if not isinstance(schema, dict):
@@ -72,15 +75,18 @@ class llm:
 
         result = schema.copy()
 
-        # If this is an object type, add additionalProperties: false
+        # If this is an object type, enforce strict mode requirements
         if result.get("type") == "object":
             result["additionalProperties"] = False
+
             # Recursively process properties
             if "properties" in result:
                 result["properties"] = {
                     k: self._make_schema_strict(v)
                     for k, v in result["properties"].items()
                 }
+                # OpenAI strict mode requires ALL properties to be in 'required'
+                result["required"] = list(result["properties"].keys())
 
         # Handle arrays
         if result.get("type") == "array" and "items" in result:
@@ -513,32 +519,33 @@ Start with <reasoning> and end with </answer>. No other text."""
 
                 # PRIMARY PATH: Try structured output first if reasoning_first and provider supports it
                 if self.reasoning_first and self.provider.supports_structured_output():
-                    try:
-                        schema = self._build_structured_schema(return_type)
-                        # Use structured system instructions
-                        structured_messages = [
-                            {
-                                "role": "system",
-                                "content": self._get_structured_system_instructions(
-                                    return_type
-                                ),
-                            },
-                            {"role": "user", "content": user_msg},
-                        ]
+                    schema = self._build_structured_schema(return_type)
+                    # Use structured system instructions
+                    structured_messages = [
+                        {
+                            "role": "system",
+                            "content": self._get_structured_system_instructions(
+                                return_type
+                            ),
+                        },
+                        {"role": "user", "content": user_msg},
+                    ]
 
-                        result = await self.provider.query_structured_async(
-                            structured_messages, schema
-                        )
+                    # Let API errors propagate - only catch response parsing errors
+                    result = await self.provider.query_structured_async(
+                        structured_messages, schema
+                    )
+
+                    try:
                         reasoning = result.get("reasoning", "")
                         answer = result.get("answer")
                         logger.debug(f"Structured output reasoning: {reasoning}")
                         logger.debug(f"Structured output answer: {answer}")
 
                         return self._parse_answer(answer, return_type)
-
-                    except Exception as e:
+                    except (KeyError, TypeError, json.JSONDecodeError, ValueError) as e:
                         logger.warning(
-                            f"Structured output failed, falling back to XML: {e}"
+                            f"Structured output parsing failed, falling back to XML: {e}"
                         )
                         # Fall through to XML fallback path
 
@@ -648,32 +655,31 @@ Start with <reasoning> and end with </answer>. No other text."""
 
                 # PRIMARY PATH: Try structured output first if reasoning_first and provider supports it
                 if self.reasoning_first and self.provider.supports_structured_output():
-                    try:
-                        schema = self._build_structured_schema(return_type)
-                        # Use structured system instructions
-                        structured_messages = [
-                            {
-                                "role": "system",
-                                "content": self._get_structured_system_instructions(
-                                    return_type
-                                ),
-                            },
-                            {"role": "user", "content": user_msg},
-                        ]
+                    schema = self._build_structured_schema(return_type)
+                    # Use structured system instructions
+                    structured_messages = [
+                        {
+                            "role": "system",
+                            "content": self._get_structured_system_instructions(
+                                return_type
+                            ),
+                        },
+                        {"role": "user", "content": user_msg},
+                    ]
 
-                        result = self.provider.query_structured(
-                            structured_messages, schema
-                        )
+                    # Let API errors propagate - only catch response parsing errors
+                    result = self.provider.query_structured(structured_messages, schema)
+
+                    try:
                         reasoning = result.get("reasoning", "")
                         answer = result.get("answer")
                         logger.debug(f"Structured output reasoning: {reasoning}")
                         logger.debug(f"Structured output answer: {answer}")
 
                         return self._parse_answer(answer, return_type)
-
-                    except Exception as e:
+                    except (KeyError, TypeError, json.JSONDecodeError, ValueError) as e:
                         logger.warning(
-                            f"Structured output failed, falling back to XML: {e}"
+                            f"Structured output parsing failed, falling back to XML: {e}"
                         )
                         # Fall through to XML fallback path
 

@@ -1,46 +1,47 @@
 import json
+import warnings
 import openai
 from .base import LLMProvider
 from typing import Union, Iterator, AsyncIterator
 
+_MODERN_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 
-class OpenAILegacyProvider(LLMProvider):
-    """
-    Legacy OpenAI Provider for older model families that use the 'max_tokens' parameter.
 
-    This provider is designed for OpenAI models that were released before the parameter
-    naming convention change. It uses the traditional 'max_tokens' parameter to control
-    the maximum number of tokens in the generated response.
+def _uses_modern_tokens(model: str) -> bool:
+    return any(model.startswith(p) for p in _MODERN_MODEL_PREFIXES)
 
-    Supported Models:
-        - GPT-3.5 Turbo (gpt-3.5-turbo)
-        - GPT-4 (gpt-4)
-        - GPT-4 Turbo (gpt-4-turbo)
-        - GPT-4o (gpt-4o)
-        - GPT-4o Mini (gpt-4o-mini)
-        - And other models that use the legacy parameter naming
 
-    Why Legacy Provider Exists:
-        OpenAI changed their API parameter naming convention for newer models.
-        Older models use 'max_tokens' while newer models (GPT-5, o-series) use
-        'max_completion_tokens'. This provider ensures backward compatibility
-        and provides a clean separation between model families.
+def _extract_usage(response) -> dict | None:
+    if hasattr(response, "usage") and response.usage:
+        return {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+            "total_tokens": response.usage.total_tokens,
+        }
+    return None
+
+
+def _extract_chunk_usage(chunk) -> dict | None:
+    if chunk and hasattr(chunk, "usage") and chunk.usage:
+        return {
+            "prompt_tokens": getattr(chunk.usage, "prompt_tokens", None),
+            "completion_tokens": getattr(chunk.usage, "completion_tokens", None),
+            "total_tokens": getattr(chunk.usage, "total_tokens", None),
+        }
+    return None
+
+
+class OpenAIProvider(LLMProvider):
+    """Unified OpenAI provider that works with both legacy and modern models.
+
+    Automatically selects the correct token-limit parameter based on the model:
+    - Modern models (GPT-5, o1/o3/o4 series) use ``max_completion_tokens``
+    - Legacy models (GPT-4o, GPT-4, GPT-3.5, etc.) use ``max_tokens``
 
     Args:
-        api_key (str): Your OpenAI API key
-        model (str): The model name (default: "gpt-4o-mini")
-        max_tokens (int): Maximum tokens in the response (default: 4096)
-
-    Example:
-        >>> provider = OpenAILegacyProvider(
-        ...     api_key="your-api-key",
-        ...     model="gpt-4o-mini",
-        ...     max_tokens=2048
-        ... )
-        >>> response = provider.query([{"role": "user", "content": "Hello!"}])
-
-    Note:
-        Use OpenAIProvider (not this legacy version) for GPT-5 and o-series models.
+        api_key: Your OpenAI API key.
+        model: The model name (default: "gpt-4o-mini").
+        max_tokens: Maximum tokens in the response (default: 4096).
     """
 
     def __init__(
@@ -49,143 +50,71 @@ class OpenAILegacyProvider(LLMProvider):
         self.api_key = api_key
         self.model = model
         self.max_tokens = max_tokens
+        self._token_param = (
+            "max_completion_tokens" if _uses_modern_tokens(model) else "max_tokens"
+        )
         self.client = openai.OpenAI(api_key=self.api_key)
         self.async_client = openai.AsyncOpenAI(api_key=self.api_key)
 
-    def query(
-        self, messages: list[dict], stream: bool = False
+    def _token_kwargs(self) -> dict:
+        return {self._token_param: self.max_tokens}
+
+    # -- core completions ------------------------------------------------
+
+    def complete(
+        self, messages: list[dict], **kwargs
     ) -> Union[str, Iterator[str]]:
-        """
-        Send a chat-style conversation to OpenAI and return the response content.
-        Handles both text-only and multimodal messages.
-        """
+        stream = kwargs.get("stream", False)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=self.max_tokens,
             stream=stream,
+            **self._token_kwargs(),
         )
 
         if stream:
-            # For streaming, store usage from the last chunk if available
-            def response_generator():
+            def _gen():
                 last_chunk = None
                 for chunk in response:
                     if chunk.choices[0].delta.content is not None:
                         yield chunk.choices[0].delta.content
                     last_chunk = chunk
-                # Store usage from the last chunk if available
-                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
-                    self._last_usage = {
-                        "prompt_tokens": (
-                            last_chunk.usage.prompt_tokens
-                            if hasattr(last_chunk.usage, "prompt_tokens")
-                            else None
-                        ),
-                        "completion_tokens": (
-                            last_chunk.usage.completion_tokens
-                            if hasattr(last_chunk.usage, "completion_tokens")
-                            else None
-                        ),
-                        "total_tokens": (
-                            last_chunk.usage.total_tokens
-                            if hasattr(last_chunk.usage, "total_tokens")
-                            else None
-                        ),
-                    }
-                else:
-                    self._last_usage = None
+                self._last_usage = _extract_chunk_usage(last_chunk)
+            return _gen()
 
-            return response_generator()
-
-        # Store usage information for non-streaming responses
-        if hasattr(response, "usage") and response.usage:
-            self._last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        else:
-            self._last_usage = None
-
+        self._last_usage = _extract_usage(response)
         return response.choices[0].message.content
 
-    async def query_async(
-        self, messages: list[dict], stream: bool = False
+    async def complete_async(
+        self, messages: list[dict], **kwargs
     ) -> Union[str, AsyncIterator[str]]:
-        """
-        Async version that sends a chat-style conversation to OpenAI and return the response content.
-        """
+        stream = kwargs.get("stream", False)
         response = await self.async_client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=self.max_tokens,
             stream=stream,
+            **self._token_kwargs(),
         )
 
         if stream:
-            # For streaming, store usage from the last chunk if available
-            async def async_response_generator():
+            async def _gen():
                 last_chunk = None
                 async for chunk in response:
                     if chunk.choices[0].delta.content is not None:
                         yield chunk.choices[0].delta.content
                     last_chunk = chunk
-                # Store usage from the last chunk if available
-                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
-                    self._last_usage = {
-                        "prompt_tokens": (
-                            last_chunk.usage.prompt_tokens
-                            if hasattr(last_chunk.usage, "prompt_tokens")
-                            else None
-                        ),
-                        "completion_tokens": (
-                            last_chunk.usage.completion_tokens
-                            if hasattr(last_chunk.usage, "completion_tokens")
-                            else None
-                        ),
-                        "total_tokens": (
-                            last_chunk.usage.total_tokens
-                            if hasattr(last_chunk.usage, "total_tokens")
-                            else None
-                        ),
-                    }
-                else:
-                    self._last_usage = None
+                self._last_usage = _extract_chunk_usage(last_chunk)
+            return _gen()
 
-            return async_response_generator()
-
-        # Store usage information for non-streaming responses
-        if hasattr(response, "usage") and response.usage:
-            self._last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        else:
-            self._last_usage = None
-
+        self._last_usage = _extract_usage(response)
         return response.choices[0].message.content
 
-    def supports_structured_output(self) -> bool:
-        """OpenAI Legacy provider supports structured output via response_format."""
-        return True
+    # -- structured output -----------------------------------------------
 
-    def query_structured(self, messages: list[dict], schema: dict) -> dict:
-        """
-        Use OpenAI's strict JSON schema mode for guaranteed structured output.
-
-        Args:
-            messages: Chat messages
-            schema: JSON Schema for the expected output structure
-
-        Returns:
-            Parsed JSON response as dict
-        """
+    def complete_structured(self, messages: list[dict], schema: dict) -> dict:
         response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=self.max_tokens,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -194,36 +123,17 @@ class OpenAILegacyProvider(LLMProvider):
                     "schema": schema,
                 },
             },
+            **self._token_kwargs(),
         )
+        self._last_usage = _extract_usage(response)
+        return json.loads(response.choices[0].message.content)
 
-        # Store usage information
-        if hasattr(response, "usage") and response.usage:
-            self._last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        else:
-            self._last_usage = None
-
-        content = response.choices[0].message.content
-        return json.loads(content)
-
-    async def query_structured_async(self, messages: list[dict], schema: dict) -> dict:
-        """
-        Async version using OpenAI's strict JSON schema mode.
-
-        Args:
-            messages: Chat messages
-            schema: JSON Schema for the expected output structure
-
-        Returns:
-            Parsed JSON response as dict
-        """
+    async def complete_structured_async(
+        self, messages: list[dict], schema: dict
+    ) -> dict:
         response = await self.async_client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=self.max_tokens,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -232,267 +142,26 @@ class OpenAILegacyProvider(LLMProvider):
                     "schema": schema,
                 },
             },
+            **self._token_kwargs(),
         )
-
-        # Store usage information
-        if hasattr(response, "usage") and response.usage:
-            self._last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        else:
-            self._last_usage = None
-
-        content = response.choices[0].message.content
-        return json.loads(content)
+        self._last_usage = _extract_usage(response)
+        return json.loads(response.choices[0].message.content)
 
 
-class OpenAIProvider(LLMProvider):
-    """
-    Modern OpenAI Provider for newer model families that use the 'max_completion_tokens' parameter.
+class OpenAILegacyProvider(OpenAIProvider):
+    """Deprecated -- use OpenAIProvider instead.
 
-    This provider is designed for OpenAI's latest generation models that use the updated
-    parameter naming convention. It uses 'max_completion_tokens' instead of 'max_tokens'
-    to provide more precise control over token generation, including both visible output
-    and reasoning tokens.
-
-    Supported Models:
-        - GPT-5 (gpt-5)
-        - o1 series (o1, o1-mini, o1-preview)
-        - o3 series (o3, o3-mini)
-        - o4 series (o4, o4-mini)
-        - Future models that adopt the new parameter convention
-
-    Why This Provider Exists:
-        OpenAI introduced 'max_completion_tokens' to provide clearer control over token
-        limits in newer models, especially those with advanced reasoning capabilities.
-        This parameter distinguishes between input tokens and completion tokens more
-        explicitly than the legacy 'max_tokens' parameter.
-
-    Key Differences from Legacy Provider:
-        - Uses 'max_completion_tokens' instead of 'max_tokens'
-        - Optimized for models with enhanced reasoning capabilities
-        - Better token accounting for complex reasoning workflows
-        - Future-proof for upcoming OpenAI model releases
-
-    Args:
-        api_key (str): Your OpenAI API key
-        model (str): The model name (default: "gpt-5")
-        max_completion_tokens (int): Maximum tokens in the completion (default: 4096)
-
-    Example:
-        >>> provider = OpenAIProvider(
-        ...     api_key="your-api-key",
-        ...     model="gpt-5",
-        ...     max_completion_tokens=8192
-        ... )
-        >>> response = provider.query([{"role": "user", "content": "Explain quantum computing"}])
-
-    Note:
-        Use OpenAILegacyProvider for older models (GPT-4o, GPT-4, GPT-3.5, etc.).
+    This alias exists for backward compatibility. OpenAIProvider now
+    auto-detects the correct token parameter for all model families.
     """
 
     def __init__(
-        self, api_key: str, model: str = "gpt-5", max_completion_tokens: int = 4096
+        self, api_key: str, model: str = "gpt-4o-mini", max_tokens: int = 4096
     ):
-        self.api_key = api_key
-        self.model = model
-        self.max_completion_tokens = max_completion_tokens
-        self.client = openai.OpenAI(api_key=self.api_key)
-        self.async_client = openai.AsyncOpenAI(api_key=self.api_key)
-
-    def query(
-        self, messages: list[dict], stream: bool = False
-    ) -> Union[str, Iterator[str]]:
-        """
-        Send a chat-style conversation to OpenAI and return the response content.
-        Handles both text-only and multimodal messages.
-        """
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_completion_tokens=self.max_completion_tokens,
-            stream=stream,
+        warnings.warn(
+            "OpenAILegacyProvider is deprecated. Use OpenAIProvider instead -- "
+            "it auto-detects the correct token parameter for all models.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-
-        if stream:
-            # For streaming, store usage from the last chunk if available
-            def response_generator():
-                last_chunk = None
-                for chunk in response:
-                    if chunk.choices[0].delta.content is not None:
-                        yield chunk.choices[0].delta.content
-                    last_chunk = chunk
-                # Store usage from the last chunk if available
-                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
-                    self._last_usage = {
-                        "prompt_tokens": (
-                            last_chunk.usage.prompt_tokens
-                            if hasattr(last_chunk.usage, "prompt_tokens")
-                            else None
-                        ),
-                        "completion_tokens": (
-                            last_chunk.usage.completion_tokens
-                            if hasattr(last_chunk.usage, "completion_tokens")
-                            else None
-                        ),
-                        "total_tokens": (
-                            last_chunk.usage.total_tokens
-                            if hasattr(last_chunk.usage, "total_tokens")
-                            else None
-                        ),
-                    }
-                else:
-                    self._last_usage = None
-
-            return response_generator()
-
-        # Store usage information for non-streaming responses
-        if hasattr(response, "usage") and response.usage:
-            self._last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        else:
-            self._last_usage = None
-
-        return response.choices[0].message.content
-
-    async def query_async(
-        self, messages: list[dict], stream: bool = False
-    ) -> Union[str, AsyncIterator[str]]:
-        """
-        Async version that sends a chat-style conversation to OpenAI and return the response content.
-        """
-        response = await self.async_client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_completion_tokens=self.max_completion_tokens,
-            stream=stream,
-        )
-
-        if stream:
-            # For streaming, store usage from the last chunk if available
-            async def async_response_generator():
-                last_chunk = None
-                async for chunk in response:
-                    if chunk.choices[0].delta.content is not None:
-                        yield chunk.choices[0].delta.content
-                    last_chunk = chunk
-                # Store usage from the last chunk if available
-                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
-                    self._last_usage = {
-                        "prompt_tokens": (
-                            last_chunk.usage.prompt_tokens
-                            if hasattr(last_chunk.usage, "prompt_tokens")
-                            else None
-                        ),
-                        "completion_tokens": (
-                            last_chunk.usage.completion_tokens
-                            if hasattr(last_chunk.usage, "completion_tokens")
-                            else None
-                        ),
-                        "total_tokens": (
-                            last_chunk.usage.total_tokens
-                            if hasattr(last_chunk.usage, "total_tokens")
-                            else None
-                        ),
-                    }
-                else:
-                    self._last_usage = None
-
-            return async_response_generator()
-
-        # Store usage information for non-streaming responses
-        if hasattr(response, "usage") and response.usage:
-            self._last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        else:
-            self._last_usage = None
-
-        return response.choices[0].message.content
-
-    def supports_structured_output(self) -> bool:
-        """OpenAI provider supports structured output via response_format."""
-        return True
-
-    def query_structured(self, messages: list[dict], schema: dict) -> dict:
-        """
-        Use OpenAI's strict JSON schema mode for guaranteed structured output.
-
-        Args:
-            messages: Chat messages
-            schema: JSON Schema for the expected output structure
-
-        Returns:
-            Parsed JSON response as dict
-        """
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_completion_tokens=self.max_completion_tokens,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "structured_response",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
-        )
-
-        # Store usage information
-        if hasattr(response, "usage") and response.usage:
-            self._last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        else:
-            self._last_usage = None
-
-        content = response.choices[0].message.content
-        return json.loads(content)
-
-    async def query_structured_async(self, messages: list[dict], schema: dict) -> dict:
-        """
-        Async version using OpenAI's strict JSON schema mode.
-
-        Args:
-            messages: Chat messages
-            schema: JSON Schema for the expected output structure
-
-        Returns:
-            Parsed JSON response as dict
-        """
-        response = await self.async_client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_completion_tokens=self.max_completion_tokens,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "structured_response",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
-        )
-
-        # Store usage information
-        if hasattr(response, "usage") and response.usage:
-            self._last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        else:
-            self._last_usage = None
-
-        content = response.choices[0].message.content
-        return json.loads(content)
+        super().__init__(api_key=api_key, model=model, max_tokens=max_tokens)

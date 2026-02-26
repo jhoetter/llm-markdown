@@ -1,742 +1,504 @@
-import re
+__version__ = "0.3.0"
+
 import inspect
 import json
 import base64
+import re
 import requests
-from io import BytesIO
 from urllib.parse import urlparse
-from typing import get_type_hints, List, Dict, Any, get_origin
+from typing import get_type_hints, get_origin, get_args, List, Dict, Any
 from pydantic import BaseModel
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def is_url(string: str) -> bool:
+# ---------------------------------------------------------------------------
+# Image type for multimodal prompts
+# ---------------------------------------------------------------------------
+
+def _is_url(string: str) -> bool:
     try:
         result = urlparse(string)
         return all([result.scheme, result.netloc])
-    except:
+    except Exception:
         return False
 
 
-def get_base64_image(input_data: str) -> str:
-    """Convert input to base64 if it's a URL, or validate/return if already base64"""
-    if is_url(input_data):
-        response = requests.get(input_data)
+def _to_data_uri(source: str) -> str:
+    """Convert a URL, file path, or raw base64 string into a data URI."""
+    if _is_url(source):
+        response = requests.get(source)
         response.raise_for_status()
-        image_data = BytesIO(response.content)
         content_type = response.headers.get("content-type", "image/jpeg")
-        base64_data = base64.b64encode(image_data.read()).decode("utf-8")
-        return f"data:{content_type};base64,{base64_data}"
+        b64 = base64.b64encode(response.content).decode("utf-8")
+        return f"data:{content_type};base64,{b64}"
 
-    # If it's already base64 or data URI, validate and return
+    if source.startswith("data:"):
+        return source
+
+    # Assume raw base64
     try:
-        if input_data.startswith("data:"):
-            # Already a data URI
-            return input_data
-        else:
-            # Try to decode to verify it's valid base64
-            base64.b64decode(input_data)
-            return f"data:image/jpeg;base64,{input_data}"
-    except:
+        base64.b64decode(source)
+        return f"data:image/jpeg;base64,{source}"
+    except Exception:
         raise ValueError(
-            "Input must be either a valid URL or base64-encoded image data"
+            "Image source must be a URL, data URI, or base64-encoded string"
         )
 
 
-class llm:
+class Image:
+    """Represents an image input for multimodal prompts.
+
+    Accepts a URL, base64 string, or data URI as ``source``.
+    """
+
+    def __init__(self, source: str):
+        self.source = source
+
+    def to_content_part(self) -> dict:
+        """Convert to an OpenAI-format image content part."""
+        data_uri = _to_data_uri(self.source)
+        return {"type": "image_url", "image_url": {"url": data_uri}}
+
+    def __repr__(self) -> str:
+        preview = self.source[:60] + "..." if len(self.source) > 60 else self.source
+        return f"Image({preview!r})"
+
+
+# ---------------------------------------------------------------------------
+# Schema helpers
+# ---------------------------------------------------------------------------
+
+def _make_schema_strict(schema: dict) -> dict:
+    """Make a JSON schema compatible with OpenAI's strict mode."""
+    if not isinstance(schema, dict):
+        return schema
+
+    result = schema.copy()
+
+    if result.get("type") == "object":
+        result["additionalProperties"] = False
+        if "properties" in result:
+            result["properties"] = {
+                k: _make_schema_strict(v) for k, v in result["properties"].items()
+            }
+            result["required"] = list(result["properties"].keys())
+
+    if result.get("type") == "array" and "items" in result:
+        result["items"] = _make_schema_strict(result["items"])
+
+    if "$defs" in result:
+        result["$defs"] = {
+            k: _make_schema_strict(v) for k, v in result["$defs"].items()
+        }
+
+    for key in ("allOf", "anyOf", "oneOf"):
+        if key in result:
+            result[key] = [_make_schema_strict(s) for s in result[key]]
+
+    return result
+
+
+def _needs_structured_output(return_type) -> bool:
+    """Return True if the return type requires structured (JSON) output."""
+    if return_type is None:
+        return False
+
+    origin = get_origin(return_type)
+    if origin in (list, List, dict, Dict):
+        return True
+
+    try:
+        if issubclass(return_type, BaseModel):
+            return True
+    except TypeError:
+        pass
+
+    return False
+
+
+def _build_schema(return_type) -> dict:
+    """Build a JSON schema for the return type (no reasoning wrapper)."""
+    origin = get_origin(return_type)
+
+    if origin in (list, List):
+        args = get_args(return_type)
+        if args:
+            inner = args[0]
+            try:
+                if issubclass(inner, BaseModel):
+                    item_schema = _make_schema_strict(inner.model_json_schema())
+                    result = {"type": "array", "items": item_schema}
+                    if "$defs" in item_schema:
+                        result["$defs"] = item_schema["items"].pop("$defs", {}) or item_schema.pop("$defs", {})
+                    return result
+            except TypeError:
+                pass
+            type_map = {str: "string", int: "integer", float: "number", bool: "boolean"}
+            return {"type": "array", "items": {"type": type_map.get(inner, "string")}}
+        return {"type": "array", "items": {"type": "string"}}
+
+    if origin in (dict, Dict):
+        return {"type": "object", "additionalProperties": False}
+
+    try:
+        if issubclass(return_type, BaseModel):
+            schema = _make_schema_strict(return_type.model_json_schema())
+            return schema
+    except TypeError:
+        pass
+
+    return {"type": "string"}
+
+
+def _system_instructions(return_type) -> str:
+    """Generate system instructions for structured output mode."""
+    try:
+        if get_origin(return_type) is None and issubclass(return_type, BaseModel):
+            schema = return_type.model_json_schema()
+            return (
+                "You are a helpful assistant. Respond with valid JSON matching "
+                f"this schema: {json.dumps(schema)}"
+            )
+    except TypeError:
+        pass
+
+    return "You are a helpful assistant. Respond with valid JSON."
+
+
+# ---------------------------------------------------------------------------
+# Answer parsing
+# ---------------------------------------------------------------------------
+
+def _cast_type(value: str, target_type) -> Any:
+    """Cast a string value to the target type."""
+    if not value:
+        return value
+
+    origin = get_origin(target_type)
+    if origin is not None:
+        if origin in (list, List):
+            try:
+                if value.startswith("[") and value.endswith("]"):
+                    return json.loads(value)
+                return [value]
+            except json.JSONDecodeError:
+                return [
+                    item.strip()
+                    for item in value.strip("[]").split(",")
+                    if item.strip()
+                ]
+        return value
+
+    try:
+        if target_type == bool:
+            return value.lower() in ("true", "t", "yes", "y", "1")
+        return target_type(value)
+    except (ValueError, TypeError):
+        return value
+
+
+def _parse_response(response, return_type) -> Any:
+    """Parse a raw LLM response into the expected return type.
+
+    Handles both structured output (dict from complete_structured) and
+    plain text (str from complete) responses.
+    """
+    if return_type is None:
+        if isinstance(response, dict):
+            return json.dumps(response)
+        return response
+
+    origin = get_origin(return_type)
+
+    # Already the right shape from structured output
+    if isinstance(response, dict):
+        try:
+            if issubclass(return_type, BaseModel):
+                return return_type.model_validate(response)
+        except TypeError:
+            pass
+        if origin in (list, List):
+            return response if isinstance(response, list) else response
+        return response
+
+    if isinstance(response, list):
+        if origin in (list, List):
+            return response
+        try:
+            if issubclass(return_type, BaseModel) and len(response) == 1:
+                return return_type.model_validate(response[0])
+        except TypeError:
+            pass
+        return response
+
+    # String response -- needs parsing
+    if not isinstance(response, str):
+        return response
+
+    if origin in (list, List):
+        return _cast_type(response, return_type)
+
+    try:
+        if issubclass(return_type, BaseModel):
+            text = response.strip()
+            if not text.startswith("{"):
+                json_match = re.search(r"\{.*\}", text, re.DOTALL)
+                if json_match:
+                    text = json_match.group(0)
+                else:
+                    raise ValueError("Could not find JSON object in response")
+            data = json.loads(text)
+            return return_type.model_validate(data)
+    except TypeError:
+        pass
+
+    return _cast_type(response, return_type)
+
+
+# ---------------------------------------------------------------------------
+# Core decorator
+# ---------------------------------------------------------------------------
+
+class _PromptDecorator:
+    """Internal decorator class -- use the ``prompt()`` factory instead."""
+
     def __init__(
         self,
         provider,
-        reasoning_first: bool = True,
         stream: bool = False,
-        langfuse_metadata: dict = None,
-        max_retries: int = 2,
+        langfuse_metadata: dict | None = None,
     ):
         self.provider = provider
-        self.reasoning_first = reasoning_first
         self.stream = stream
         self.langfuse_metadata = langfuse_metadata or {}
-        self.max_retries = max_retries
 
-    def _make_schema_strict(self, schema: dict) -> dict:
-        """
-        Make a JSON schema compatible with OpenAI's strict mode.
-
-        OpenAI's strict mode requires:
-        1. 'additionalProperties: false' on all object types
-        2. 'required' must include ALL keys from 'properties'
-
-        Also handles $defs for nested Pydantic models.
-        """
-        if not isinstance(schema, dict):
-            return schema
-
-        result = schema.copy()
-
-        # If this is an object type, enforce strict mode requirements
-        if result.get("type") == "object":
-            result["additionalProperties"] = False
-
-            # Recursively process properties
-            if "properties" in result:
-                result["properties"] = {
-                    k: self._make_schema_strict(v)
-                    for k, v in result["properties"].items()
-                }
-                # OpenAI strict mode requires ALL properties to be in 'required'
-                result["required"] = list(result["properties"].keys())
-
-        # Handle arrays
-        if result.get("type") == "array" and "items" in result:
-            result["items"] = self._make_schema_strict(result["items"])
-
-        # Handle $defs (Pydantic puts nested model definitions here)
-        if "$defs" in result:
-            result["$defs"] = {
-                k: self._make_schema_strict(v) for k, v in result["$defs"].items()
-            }
-
-        # Handle allOf, anyOf, oneOf
-        for key in ["allOf", "anyOf", "oneOf"]:
-            if key in result:
-                result[key] = [self._make_schema_strict(s) for s in result[key]]
-
-        return result
-
-    def _build_structured_schema(self, return_type) -> dict:
-        """
-        Build JSON schema for structured output with reasoning.
-
-        Creates a schema that wraps the return type with a reasoning field,
-        suitable for use with OpenAI's response_format json_schema.
-        """
-        # Initialize $defs to potentially hoist from answer schema
-        hoisted_defs = {}
-
-        # Get answer schema based on return type
-        if return_type is None:
-            answer_schema = {"type": "string"}
-        elif get_origin(return_type) is not None:
-            # Handle typing annotations (List, Dict, etc)
-            origin = get_origin(return_type)
-            if origin in (list, List):
-                answer_schema = {"type": "array", "items": {"type": "string"}}
-            elif origin in (dict, Dict):
-                answer_schema = {"type": "object", "additionalProperties": False}
-            else:
-                answer_schema = {"type": "string"}
-        else:
-            try:
-                if issubclass(return_type, BaseModel):
-                    # Get Pydantic model schema and make it strict for OpenAI
-                    answer_schema = self._make_schema_strict(
-                        return_type.model_json_schema()
-                    )
-                    # Hoist $defs to root level (OpenAI requires $refs to work from root)
-                    if "$defs" in answer_schema:
-                        hoisted_defs = answer_schema.pop("$defs")
-                elif return_type == str:
-                    answer_schema = {"type": "string"}
-                elif return_type == int:
-                    answer_schema = {"type": "integer"}
-                elif return_type == float:
-                    answer_schema = {"type": "number"}
-                elif return_type == bool:
-                    answer_schema = {"type": "boolean"}
-                else:
-                    answer_schema = {"type": "string"}
-            except TypeError:
-                answer_schema = {"type": "string"}
-
-        # Wrap with reasoning
-        result = {
-            "type": "object",
-            "properties": {
-                "reasoning": {
-                    "type": "string",
-                    "description": "Step-by-step reasoning process",
-                },
-                "answer": answer_schema,
-            },
-            "required": ["reasoning", "answer"],
-            "additionalProperties": False,
-        }
-
-        # Add hoisted $defs at root level if any
-        if hoisted_defs:
-            result["$defs"] = hoisted_defs
-
-        return result
-
-    def _get_structured_system_instructions(self, return_type) -> str:
-        """Generate simpler system instructions for structured output mode."""
-        if return_type is None:
-            return """You are a helpful assistant. You will respond with JSON.
-Include your reasoning in the 'reasoning' field and your answer in the 'answer' field."""
-
-        try:
-            if get_origin(return_type) is None and issubclass(return_type, BaseModel):
-                schema = return_type.model_json_schema()
-                return f"""You are a helpful assistant. You will respond with JSON.
-The 'reasoning' field should contain your step-by-step thought process.
-The 'answer' field must be a valid JSON object matching this schema: {json.dumps(schema)}"""
-        except TypeError:
-            pass
-
-        return """You are a helpful assistant. You will respond with JSON.
-Include your reasoning in the 'reasoning' field and your answer in the 'answer' field."""
-
-    def _parse_answer(self, answer, return_type):
-        """Parse the answer into the expected return type."""
-        if return_type is None:
-            return answer
-
-        # Handle typing annotations (List, Dict, etc)
-        if get_origin(return_type) is not None:
-            if isinstance(answer, str):
-                return self.cast_type(answer, return_type)
-            return answer
-
-        try:
-            if issubclass(return_type, BaseModel):
-                # Handle Pydantic models
-                if isinstance(answer, dict):
-                    data = answer
-                elif isinstance(answer, str):
-                    # Try to extract JSON if it's a string
-                    if not answer.strip().startswith("{"):
-                        json_match = re.search(r"\{.*\}", answer, re.DOTALL)
-                        if json_match:
-                            answer = json_match.group(0)
-                        else:
-                            raise ValueError(
-                                "Could not find JSON-like content in response"
-                            )
-                    data = json.loads(answer)
-                else:
-                    data = answer
-
-                return return_type.model_validate(data)
-        except TypeError:
-            pass
-
-        # Handle primitive types
-        if isinstance(answer, str):
-            return self.cast_type(answer, return_type)
-        return answer
-
-    def _get_correction_prompt(self) -> str:
-        """Get the correction prompt for self-healing retry."""
-        return """Your response was missing the required XML tags.
-Please provide your COMPLETE response using EXACTLY this structure:
-
-<reasoning>
-Your step-by-step thinking here.
-</reasoning>
-<answer>
-Your final answer here (JSON if returning an object).
-</answer>
-
-Start with <reasoning> and end with </answer>. No other text."""
-
-    def _query_with_xml_fallback(self, messages: list, return_type) -> Any:
-        """
-        XML extraction with self-healing retry.
-
-        Tries to extract reasoning and answer tags from the response.
-        If extraction fails, retries with a correction prompt.
-        """
-        last_error = None
-        working_messages = messages.copy()
-
-        for attempt in range(self.max_retries + 1):
-            raw_response = self.provider.query(working_messages, stream=False)
-            raw_response = raw_response.strip()
-            logger.debug(f"Raw LLM response (attempt {attempt + 1}):\n{raw_response}")
-
-            try:
-                reasoning = self.extract_tag(raw_response, "reasoning")
-                logger.debug(f"Extracted reasoning:\n{reasoning}")
-                answer = self.extract_tag(raw_response, "answer")
-                logger.debug(f"Extracted answer:\n{answer}")
-                logger.debug(f"XML extraction succeeded on attempt {attempt + 1}")
-                return self._parse_answer(answer, return_type)
-
-            except ValueError as e:
-                last_error = e
-                logger.warning(f"XML extraction failed (attempt {attempt + 1}): {e}")
-
-                if attempt < self.max_retries:
-                    # Self-healing: add correction prompt
-                    working_messages.append(
-                        {"role": "assistant", "content": raw_response}
-                    )
-                    working_messages.append(
-                        {"role": "user", "content": self._get_correction_prompt()}
-                    )
-
-        raise last_error
-
-    async def _query_with_xml_fallback_async(self, messages: list, return_type) -> Any:
-        """
-        Async version of XML extraction with self-healing retry.
-        """
-        last_error = None
-        working_messages = messages.copy()
-
-        for attempt in range(self.max_retries + 1):
-            raw_response = await self.provider.query_async(
-                working_messages, stream=False
-            )
-            raw_response = raw_response.strip()
-            logger.debug(f"Raw LLM response (attempt {attempt + 1}):\n{raw_response}")
-
-            try:
-                reasoning = self.extract_tag(raw_response, "reasoning")
-                logger.debug(f"Extracted reasoning:\n{reasoning}")
-                answer = self.extract_tag(raw_response, "answer")
-                logger.debug(f"Extracted answer:\n{answer}")
-                logger.debug(f"XML extraction succeeded on attempt {attempt + 1}")
-                return self._parse_answer(answer, return_type)
-
-            except ValueError as e:
-                last_error = e
-                logger.warning(f"XML extraction failed (attempt {attempt + 1}): {e}")
-
-                if attempt < self.max_retries:
-                    # Self-healing: add correction prompt
-                    working_messages.append(
-                        {"role": "assistant", "content": raw_response}
-                    )
-                    working_messages.append(
-                        {"role": "user", "content": self._get_correction_prompt()}
-                    )
-
-        raise last_error
-
-    def get_system_instructions(self, return_type, use_structured: bool = False) -> str:
-        """Generate appropriate system instructions based on return type."""
-        # For structured output mode, use simpler instructions
-        if use_structured:
-            return self._get_structured_system_instructions(return_type)
-
-        if not return_type:
-            return "You are a helpful assistant."
-
-        # Check if it's a typing annotation (List, Dict, etc)
-        if get_origin(return_type) is not None:
-            assert (
-                self.reasoning_first
-            ), "Reasoning first must be True for typing annotations"
-            return """
-            You are a helpful assistant. Always structure your output as follows:
-            <reasoning>
-            Provide the reasoning behind your answer.
-            </reasoning>
-            <answer>
-            Provide the final answer only, formatted as required.
-            </answer>
-
-            You MUST follow the schema above exactly, i.e. start with the <reasoning> tag, close it with </reasoning>, then start the <answer> tag and close it with </answer>.
-            """
-
-        # Check if it's a Pydantic model
-        if issubclass(return_type, BaseModel):
-            assert (
-                self.reasoning_first
-            ), "Reasoning first must be True for Pydantic models"
-            # Get the JSON schema for the Pydantic model
-            schema = return_type.model_json_schema()
-            return f"""
-            You are a helpful assistant that always returns JSON output for Pydantic models.
-            The expected response MUST exactly match this JSON schema:
-            {schema}
-
-            When responding, use the following structure:
-            <reasoning>
-            Explain the thought process (if necessary).
-            </reasoning>
-            <answer>
-            A valid JSON object matching the schema above exactly.
-            </answer>
-
-            You MUST follow the schema above exactly, i.e. start with the <reasoning> tag, close it with </reasoning>, then start the <answer> tag and close it with </answer>.
-            In the <answer> tag, you MUST return a valid JSON object matching the schema above exactly.
-            """
-
-        # For primitive types
-        if self.reasoning_first:
-            return """
-            You are a helpful assistant. Always structure your output as follows:
-            <reasoning>
-            Provide the reasoning behind your answer.
-            </reasoning>
-            <answer>
-            Provide the final answer only, formatted as required.
-            </answer>
-
-            You MUST follow the schema above exactly, i.e. start with the <reasoning> tag, close it with </reasoning>, then start the <answer> tag and close it with </answer>.
-            In the <answer> tag, you MUST return the final answer only, formatted as required.
-            """
-        else:
-            return "You are a helpful assistant."
-
-    def parse_content(self, text: str, template_vars: dict) -> List[Dict[str, Any]]:
-        """
-        Parse text containing special syntax for multimodal content.
-        Supports:
-        - !image[url] for images (converts URLs to base64)
-        - Regular text
-        """
-        lines = text.strip().split("\n")
-        content = []
-        current_text = []
-
-        for line in lines:
-            if match := re.match(r"!image\[(.*?)\]", line.strip()):
-                # If we have accumulated text, add it first
-                if current_text:
-                    content.append(
-                        {"type": "text", "text": "\n".join(current_text).strip()}
-                    )
-                    current_text = []
-
-                image_input = match.group(1).strip()
-                try:
-                    image_data_uri = get_base64_image(image_input)
-                    content.append(
-                        {"type": "image_url", "image_url": {"url": image_data_uri}}
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to process image {image_input}: {e}")
-                    raise
-            else:
-                current_text.append(line)
-
-        # Add any remaining text
-        if current_text:
-            content.append({"type": "text", "text": "\n".join(current_text).strip()})
-
-        return content
-
-    def __call__(self, func):
-        # Check if the decorated function is async
-        is_async = inspect.iscoroutinefunction(func)
-
-        if is_async:
-            # If it's an async function, return an async wrapper
-            async def async_wrapper(*args, **kwargs):
-                # Get return type
-                return_type = get_type_hints(func).get("return")
-
-                # Get system instructions & set up the conversation
-                system_instructions = self.get_system_instructions(return_type)
-                sig = inspect.signature(func)
-                bound_args = sig.bind(*args, **kwargs)
-                bound_args.apply_defaults()
-
-                try:
-                    # Attempt to extract user_prompt from function body
-                    source = inspect.getsource(func)
-                    match = re.search(r'"""(.*?)"""', source, re.DOTALL)
-                    if match:
-                        user_prompt = match.group(1)
-                        # Evaluate as f-string if possible
-                        user_prompt = eval(
-                            f"f'''{user_prompt}'''", {}, bound_args.arguments
-                        )
-                    else:
-                        # Fallback to docstring if no triple-quoted string was found
-                        user_prompt = inspect.getdoc(func)
-                        if user_prompt:
-                            user_prompt = eval(
-                                f"f'''{user_prompt}'''", {}, bound_args.arguments
-                            )
-
-                except Exception as e:
-                    logger.debug(f"Error extracting string from function body: {e}")
-                    user_prompt = inspect.getdoc(func)
-                    if user_prompt:
-                        user_prompt = eval(
-                            f"f'''{user_prompt}'''", {}, bound_args.arguments
-                        )
-
-                if not user_prompt:
-                    raise ValueError(
-                        "Function must have either a string body or a docstring."
-                    )
-
-                # Parse the user prompt into content
-                content = self.parse_content(user_prompt, bound_args.arguments)
-
-                # Build messages for the LLM
-                messages = [{"role": "system", "content": system_instructions}]
-
-                # Handle special case for Pydantic models
-                if return_type and get_origin(return_type) is None:
-                    try:
-                        if issubclass(return_type, BaseModel):
-                            # Add a reminder to produce valid JSON
-                            content_list = self.parse_content(
-                                user_prompt, bound_args.arguments
-                            )
-                            if (
-                                isinstance(content_list, list)
-                                and len(content_list) == 1
-                                and "text" in content_list[0]
-                            ):
-                                content_list[0][
-                                    "text"
-                                ] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
-                            user_msg = (
-                                content_list
-                                if len(content_list) > 1
-                                else content_list[0]["text"]
-                            )
-                        else:
-                            user_msg = (
-                                content if len(content) > 1 else content[0]["text"]
-                            )
-                    except TypeError:
-                        user_msg = content if len(content) > 1 else content[0]["text"]
-                else:
-                    user_msg = content if len(content) > 1 else content[0]["text"]
-
-                messages.append({"role": "user", "content": user_msg})
-
-                # Set metadata on LangfuseWrapper if it's being used
-                if hasattr(self.provider, "set_request_metadata"):
-                    self.provider.set_request_metadata(self.langfuse_metadata)
-
-                # Handle streaming separately (no structured output for streaming)
-                if self.stream:
-                    raw_response = await self.provider.query_async(
-                        messages, stream=True
-                    )
-                    return raw_response
-
-                # PRIMARY PATH: Try structured output first if reasoning_first and provider supports it
-                if self.reasoning_first and self.provider.supports_structured_output():
-                    schema = self._build_structured_schema(return_type)
-                    # Use structured system instructions
-                    structured_messages = [
-                        {
-                            "role": "system",
-                            "content": self._get_structured_system_instructions(
-                                return_type
-                            ),
-                        },
-                        {"role": "user", "content": user_msg},
-                    ]
-
-                    # Let API errors propagate - only catch response parsing errors
-                    result = await self.provider.query_structured_async(
-                        structured_messages, schema
-                    )
-
-                    try:
-                        reasoning = result.get("reasoning", "")
-                        answer = result.get("answer")
-                        logger.debug(f"Structured output reasoning: {reasoning}")
-                        logger.debug(f"Structured output answer: {answer}")
-
-                        return self._parse_answer(answer, return_type)
-                    except (KeyError, TypeError, json.JSONDecodeError, ValueError) as e:
-                        logger.warning(
-                            f"Structured output parsing failed, falling back to XML: {e}"
-                        )
-                        # Fall through to XML fallback path
-
-                # FALLBACK PATH: XML tags with self-healing (or primary if no structured output support)
-                if self.reasoning_first:
-                    return await self._query_with_xml_fallback_async(
-                        messages, return_type
-                    )
-
-                # No reasoning required, just query directly
-                raw_response = await self.provider.query_async(messages, stream=False)
-                raw_response = raw_response.strip()
-                logger.debug(f"Raw LLM response:\n{raw_response}")
-
-                return self._parse_answer(raw_response, return_type)
-
-            return async_wrapper
-        else:
-            # For synchronous functions, use the original wrapper
-            def wrapper(*args, **kwargs):
-                # Get return type
-                return_type = get_type_hints(func).get("return")
-
-                # Get system instructions & set up the conversation
-                system_instructions = self.get_system_instructions(return_type)
-                sig = inspect.signature(func)
-                bound_args = sig.bind(*args, **kwargs)
-                bound_args.apply_defaults()
-
-                try:
-                    # Attempt to extract user_prompt from function body
-                    source = inspect.getsource(func)
-                    match = re.search(r'"""(.*?)"""', source, re.DOTALL)
-                    if match:
-                        user_prompt = match.group(1)
-                        # Evaluate as f-string if possible
-                        user_prompt = eval(
-                            f"f'''{user_prompt}'''", {}, bound_args.arguments
-                        )
-                    else:
-                        # Fallback to docstring if no triple-quoted string was found
-                        user_prompt = inspect.getdoc(func)
-                        if user_prompt:
-                            user_prompt = eval(
-                                f"f'''{user_prompt}'''", {}, bound_args.arguments
-                            )
-
-                except Exception as e:
-                    logger.debug(f"Error extracting string from function body: {e}")
-                    user_prompt = inspect.getdoc(func)
-                    if user_prompt:
-                        user_prompt = eval(
-                            f"f'''{user_prompt}'''", {}, bound_args.arguments
-                        )
-
-                if not user_prompt:
-                    raise ValueError(
-                        "Function must have either a string body or a docstring."
-                    )
-
-                # Parse the user prompt into content
-                content = self.parse_content(user_prompt, bound_args.arguments)
-
-                # Build messages for the LLM
-                messages = [{"role": "system", "content": system_instructions}]
-
-                # Handle special case for Pydantic models
-                if return_type and get_origin(return_type) is None:
-                    try:
-                        if issubclass(return_type, BaseModel):
-                            # Add a reminder to produce valid JSON
-                            content_list = self.parse_content(
-                                user_prompt, bound_args.arguments
-                            )
-                            if (
-                                isinstance(content_list, list)
-                                and len(content_list) == 1
-                                and "text" in content_list[0]
-                            ):
-                                content_list[0][
-                                    "text"
-                                ] += "\n\n**Important**: Return as valid JSON matching the model's field names exactly."
-                            user_msg = (
-                                content_list
-                                if len(content_list) > 1
-                                else content_list[0]["text"]
-                            )
-                        else:
-                            user_msg = (
-                                content if len(content) > 1 else content[0]["text"]
-                            )
-                    except TypeError:
-                        user_msg = content if len(content) > 1 else content[0]["text"]
-                else:
-                    user_msg = content if len(content) > 1 else content[0]["text"]
-
-                messages.append({"role": "user", "content": user_msg})
-
-                # Set metadata on LangfuseWrapper if it's being used
-                if hasattr(self.provider, "set_request_metadata"):
-                    self.provider.set_request_metadata(self.langfuse_metadata)
-
-                # Handle streaming separately (no structured output for streaming)
-                if self.stream:
-                    raw_response = self.provider.query(messages, stream=True)
-                    return raw_response
-
-                # PRIMARY PATH: Try structured output first if reasoning_first and provider supports it
-                if self.reasoning_first and self.provider.supports_structured_output():
-                    schema = self._build_structured_schema(return_type)
-                    # Use structured system instructions
-                    structured_messages = [
-                        {
-                            "role": "system",
-                            "content": self._get_structured_system_instructions(
-                                return_type
-                            ),
-                        },
-                        {"role": "user", "content": user_msg},
-                    ]
-
-                    # Let API errors propagate - only catch response parsing errors
-                    result = self.provider.query_structured(structured_messages, schema)
-
-                    try:
-                        reasoning = result.get("reasoning", "")
-                        answer = result.get("answer")
-                        logger.debug(f"Structured output reasoning: {reasoning}")
-                        logger.debug(f"Structured output answer: {answer}")
-
-                        return self._parse_answer(answer, return_type)
-                    except (KeyError, TypeError, json.JSONDecodeError, ValueError) as e:
-                        logger.warning(
-                            f"Structured output parsing failed, falling back to XML: {e}"
-                        )
-                        # Fall through to XML fallback path
-
-                # FALLBACK PATH: XML tags with self-healing (or primary if no structured output support)
-                if self.reasoning_first:
-                    return self._query_with_xml_fallback(messages, return_type)
-
-                # No reasoning required, just query directly
-                raw_response = self.provider.query(messages, stream=False)
-                raw_response = raw_response.strip()
-                logger.debug(f"Raw LLM response:\n{raw_response}")
-
-                return self._parse_answer(raw_response, return_type)
-
-            return wrapper
+    # -- prompt & message building ---------------------------------------
 
     @staticmethod
-    def extract_tag(response: str, tag: str) -> str:
-        """
-        Extract content between <tag>...</tag>.
-        """
-        match = re.search(f"<{tag}>(.*?)</{tag}>", response, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        raise ValueError(f"Tag <{tag}> not found in response: {response}")
+    def _extract_prompt(func, arguments: dict) -> str:
+        """Get the prompt from the function's docstring and interpolate arguments."""
+        raw = inspect.getdoc(func)
+        if not raw:
+            raise ValueError(
+                f"Function {func.__name__} must have a docstring to use as a prompt."
+            )
+        return raw.format(**arguments)
 
-    def cast_type(self, value: str, target_type) -> Any:
-        """Cast a string value to the target type."""
-        if not value:
-            return value
+    @staticmethod
+    def _build_user_message(prompt_text: str, image_args: list[Image]):
+        """Build the user message, handling multimodal content when Images are present."""
+        if not image_args:
+            return prompt_text
 
-        # Handle typing annotations (List, Dict, etc)
-        origin = get_origin(target_type)
-        if origin is not None:
-            if origin in (list, List):
-                # If the value looks like a string representation of a list
-                try:
-                    if value.startswith("[") and value.endswith("]"):
-                        # Parse the string as JSON to get a proper list
-                        return json.loads(value)
-                    else:
-                        # Single value, wrap it in a list
-                        return [value]
-                except json.JSONDecodeError:
-                    # If JSON parsing fails, split by commas and strip whitespace
-                    return [
-                        item.strip()
-                        for item in value.strip("[]").split(",")
-                        if item.strip()
-                    ]
-            # Add more type handling here as needed
-            return value
+        content: list[dict] = [{"type": "text", "text": prompt_text}]
+        for img in image_args:
+            content.append(img.to_content_part())
+        return content
 
-        # Handle primitive types
+    @staticmethod
+    def _collect_images(arguments: dict, type_hints: dict) -> list[Image]:
+        """Find all Image-typed arguments."""
+        images = []
+        for name, hint in type_hints.items():
+            if name == "return":
+                continue
+            if hint is Image:
+                val = arguments.get(name)
+                if isinstance(val, Image):
+                    images.append(val)
+            elif get_origin(hint) in (list, List):
+                args = get_args(hint)
+                if args and args[0] is Image:
+                    val = arguments.get(name, [])
+                    images.extend(v for v in val if isinstance(v, Image))
+        return images
+
+    # -- execution paths -------------------------------------------------
+
+    def _execute_structured(self, messages: list[dict], return_type):
+        """Structured output path via complete_structured."""
+        schema = _build_schema(return_type)
+        sys_msg = _system_instructions(return_type)
+        structured_messages = [
+            {"role": "system", "content": sys_msg},
+            messages[-1],
+        ]
+        result = self.provider.complete_structured(structured_messages, schema)
+        logger.debug(f"Structured output: {result}")
+        return _parse_response(result, return_type)
+
+    async def _execute_structured_async(self, messages: list[dict], return_type):
+        """Async structured output path via complete_structured_async."""
+        schema = _build_schema(return_type)
+        sys_msg = _system_instructions(return_type)
+        structured_messages = [
+            {"role": "system", "content": sys_msg},
+            messages[-1],
+        ]
+        result = await self.provider.complete_structured_async(
+            structured_messages, schema
+        )
+        logger.debug(f"Structured output: {result}")
+        return _parse_response(result, return_type)
+
+    def _execute_json_fallback(self, messages: list[dict], return_type):
+        """Fallback: ask for JSON via system prompt, parse the text response."""
+        sys_msg = _system_instructions(return_type)
+        fallback_messages = [
+            {"role": "system", "content": sys_msg},
+            messages[-1],
+        ]
+        raw = self.provider.complete(fallback_messages, stream=False)
+        raw = raw.strip()
+        logger.debug(f"JSON fallback response:\n{raw}")
         try:
-            if target_type == bool:
-                return value.lower() in ("true", "t", "yes", "y", "1")
-            return target_type(value)
-        except (ValueError, TypeError):
-            return value
+            parsed = json.loads(raw)
+            return _parse_response(parsed, return_type)
+        except json.JSONDecodeError:
+            return _parse_response(raw, return_type)
+
+    async def _execute_json_fallback_async(self, messages: list[dict], return_type):
+        """Async fallback: ask for JSON via system prompt, parse the text response."""
+        sys_msg = _system_instructions(return_type)
+        fallback_messages = [
+            {"role": "system", "content": sys_msg},
+            messages[-1],
+        ]
+        raw = await self.provider.complete_async(fallback_messages, stream=False)
+        raw = raw.strip()
+        logger.debug(f"JSON fallback response:\n{raw}")
+        try:
+            parsed = json.loads(raw)
+            return _parse_response(parsed, return_type)
+        except json.JSONDecodeError:
+            return _parse_response(raw, return_type)
+
+    # -- decorator -------------------------------------------------------
+
+    def __call__(self, func):
+        is_async = inspect.iscoroutinefunction(func)
+        hints = get_type_hints(func)
+
+        if is_async:
+            async def async_wrapper(*args, **kwargs):
+                return_type = hints.get("return")
+                sig = inspect.signature(func)
+                bound = sig.bind(*args, **kwargs)
+                bound.apply_defaults()
+
+                prompt_text = self._extract_prompt(func, bound.arguments)
+                images = self._collect_images(bound.arguments, hints)
+                user_msg = self._build_user_message(prompt_text, images)
+
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": user_msg},
+                ]
+
+                if hasattr(self.provider, "set_request_metadata"):
+                    self.provider.set_request_metadata(self.langfuse_metadata)
+
+                if self.stream:
+                    return await self.provider.complete_async(
+                        messages, stream=True
+                    )
+
+                if _needs_structured_output(return_type):
+                    try:
+                        return await self._execute_structured_async(
+                            messages, return_type
+                        )
+                    except NotImplementedError:
+                        logger.debug(
+                            f"{type(self.provider).__name__} does not support "
+                            "structured output, falling back to JSON prompting"
+                        )
+                        return await self._execute_json_fallback_async(
+                            messages, return_type
+                        )
+
+                raw = await self.provider.complete_async(messages, stream=False)
+                raw = raw.strip()
+                logger.debug(f"Raw LLM response:\n{raw}")
+                return _parse_response(raw, return_type)
+
+            async_wrapper.__name__ = func.__name__
+            async_wrapper.__doc__ = func.__doc__
+            return async_wrapper
+        else:
+            def wrapper(*args, **kwargs):
+                return_type = hints.get("return")
+                sig = inspect.signature(func)
+                bound = sig.bind(*args, **kwargs)
+                bound.apply_defaults()
+
+                prompt_text = self._extract_prompt(func, bound.arguments)
+                images = self._collect_images(bound.arguments, hints)
+                user_msg = self._build_user_message(prompt_text, images)
+
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": user_msg},
+                ]
+
+                if hasattr(self.provider, "set_request_metadata"):
+                    self.provider.set_request_metadata(self.langfuse_metadata)
+
+                if self.stream:
+                    return self.provider.complete(messages, stream=True)
+
+                if _needs_structured_output(return_type):
+                    try:
+                        return self._execute_structured(messages, return_type)
+                    except NotImplementedError:
+                        logger.debug(
+                            f"{type(self.provider).__name__} does not support "
+                            "structured output, falling back to JSON prompting"
+                        )
+                        return self._execute_json_fallback(messages, return_type)
+
+                raw = self.provider.complete(messages, stream=False)
+                raw = raw.strip()
+                logger.debug(f"Raw LLM response:\n{raw}")
+                return _parse_response(raw, return_type)
+
+            wrapper.__name__ = func.__name__
+            wrapper.__doc__ = func.__doc__
+            return wrapper
+
+
+def prompt(
+    provider,
+    *,
+    stream: bool = False,
+    langfuse_metadata: dict | None = None,
+):
+    """Decorator factory that turns a function's docstring into an LLM prompt.
+
+    The execution path is chosen automatically based on the return type:
+
+    - ``str``, ``int``, ``float``, ``bool`` (or no annotation) use plain
+      text completion.
+    - Pydantic ``BaseModel`` subclasses and generic collection types
+      (``List[...]``, ``Dict[...]``) use the provider's structured output
+      when available, with an automatic JSON-prompting fallback.
+    - ``stream=True`` always uses plain streaming regardless of return type.
+
+    Args:
+        provider: An LLMProvider instance.
+        stream: If True, return a streaming iterator instead of a complete response.
+        langfuse_metadata: Optional metadata dict passed to LangfuseWrapper.
+
+    Example::
+
+        @prompt(provider=my_provider)
+        def summarize(text: str) -> str:
+            \"\"\"Summarize this text in 2 sentences: {text}\"\"\"
+    """
+    return _PromptDecorator(
+        provider=provider,
+        stream=stream,
+        langfuse_metadata=langfuse_metadata,
+    )

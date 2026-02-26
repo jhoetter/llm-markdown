@@ -1,88 +1,61 @@
 from abc import ABC, abstractmethod
-from typing import Iterator, Union, Awaitable, AsyncIterator
+from typing import Iterator, Union, AsyncIterator
 
 
 class LLMProvider(ABC):
+    """Base class for LLM providers.
+
+    Subclasses must implement `complete` and `complete_async`.
+    Override `complete_structured` / `complete_structured_async` to enable
+    native structured JSON output (e.g. OpenAI's response_format).
+    """
+
     @abstractmethod
-    def query(
-        self, messages: list[dict], stream: bool = False
+    def complete(
+        self, messages: list[dict], **kwargs
     ) -> Union[str, Iterator[str]]:
-        """
-        Send a list of messages to the LLM and return the response.
-        Messages should follow the format:
-        [
-            {"role": "system", "content": "System message here"},
-            {"role": "user", "content": "User message here"}
-        ]
+        """Send messages to the LLM and return the response.
 
         Args:
-            messages: List of message dictionaries
-            stream: If True, return an iterator of response chunks
+            messages: List of message dicts (role + content).
+            **kwargs: Provider-specific options (e.g. stream=True).
 
         Returns:
-            Either a complete response string or an iterator of response chunks
+            A response string, or an iterator of chunks when streaming.
         """
-        pass
 
     @abstractmethod
-    async def query_async(
-        self, messages: list[dict], stream: bool = False
+    async def complete_async(
+        self, messages: list[dict], **kwargs
     ) -> Union[str, AsyncIterator[str]]:
-        """
-        Async version of query method.
-        Send a list of messages to the LLM and return the response asynchronously.
+        """Async version of complete."""
+
+    def complete_structured(self, messages: list[dict], schema: dict) -> dict:
+        """Query with structured output. Returns parsed JSON dict.
+
+        Providers that support native structured output (e.g. OpenAI's
+        response_format with json_schema) should override this method.
 
         Args:
-            messages: List of message dictionaries
-            stream: If True, return an async iterator of response chunks
+            messages: Chat messages.
+            schema: JSON Schema for the expected output structure.
 
         Returns:
-            Either a complete response string or an async iterator of response chunks
-        """
-        pass
-
-    # Optional structured output support - providers can override these methods
-    def supports_structured_output(self) -> bool:
-        """
-        Return True if this provider supports native structured JSON output.
-
-        Providers that support structured output (e.g., OpenAI with response_format)
-        should override this method to return True.
-        """
-        return False
-
-    def query_structured(self, messages: list[dict], schema: dict) -> dict:
-        """
-        Query with structured output. Returns parsed JSON dict.
-
-        This method uses provider-native structured output capabilities
-        (e.g., OpenAI's response_format with json_schema) to guarantee
-        valid JSON output matching the provided schema.
-
-        Args:
-            messages: Chat messages
-            schema: JSON Schema for the expected output structure
-
-        Returns:
-            Parsed JSON response as dict with 'reasoning' and 'answer' keys
+            Parsed JSON response as dict.
 
         Raises:
-            NotImplementedError: If provider does not support structured output
+            NotImplementedError: If the provider does not support structured output.
         """
-        raise NotImplementedError("This provider does not support structured output")
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support structured output. "
+            "Override complete_structured() to enable it."
+        )
 
-    async def query_structured_async(self, messages: list[dict], schema: dict) -> dict:
-        """
-        Async version of query_structured.
-
-        Args:
-            messages: Chat messages
-            schema: JSON Schema for the expected output structure
-
-        Returns:
-            Parsed JSON response as dict with 'reasoning' and 'answer' keys
-
-        Raises:
-            NotImplementedError: If provider does not support structured output
-        """
-        raise NotImplementedError("This provider does not support structured output")
+    async def complete_structured_async(
+        self, messages: list[dict], schema: dict
+    ) -> dict:
+        """Async version of complete_structured."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support structured output. "
+            "Override complete_structured_async() to enable it."
+        )

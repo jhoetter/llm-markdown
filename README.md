@@ -1,30 +1,6 @@
 # llm-markdown
 
-Turn Python functions into typed LLM calls using docstrings as prompts.
-
-Write a function, add a `@prompt` decorator, and the docstring becomes the LLM prompt. The return type annotation controls everything -- primitive types get plain text completion, Pydantic models get structured output with automatic JSON schema generation and validation.
-
-## Installation
-
-```bash
-pip install llm-markdown[all]
-```
-
-Or pick only what you need:
-
-```bash
-pip install llm-markdown              # core only (pydantic + requests)
-pip install llm-markdown[openai]      # + OpenAI provider
-pip install llm-markdown[langfuse]    # + Langfuse observability
-```
-
-For local development:
-
-```bash
-pip install -e ".[all,test]"
-```
-
-## Quick start
+LLM calls as Python functions. Write a docstring, add a type hint, done.
 
 ```python
 from llm_markdown import prompt
@@ -37,17 +13,30 @@ def summarize(text: str) -> str:
     """Summarize this text in 2 sentences: {text}"""
 
 result = summarize("Long article text here...")
-print(result)  # A plain string summary
+# "The article discusses... In conclusion, ..."
 ```
 
-The return type drives the behavior:
-- `-> str` uses plain text completion
-- `-> MyPydanticModel` uses structured output with JSON schema enforcement
-- No flags, no configuration beyond the type hint.
+## How it works
 
-## Structured output with Pydantic
+Three rules:
 
-Return a Pydantic model and the library handles JSON schema generation, structured output, and validation:
+1. The **docstring** is the prompt. Use `{param}` to interpolate function arguments.
+2. The **return type** controls the output format. `-> str` gives plain text. `-> MyModel` gives validated structured output.
+3. **`Image` parameters** are attached as vision inputs automatically -- they don't appear in the docstring.
+
+That's it. No configuration flags, no prompt templates, no output parsers. The function signature *is* the configuration.
+
+## Installation
+
+```bash
+pip install llm-markdown[openai]
+```
+
+Other extras: `langfuse` (observability), `all` (everything), `test` (pytest suite).
+
+## Structured output
+
+Return a Pydantic model and the response is validated automatically:
 
 ```python
 from pydantic import BaseModel
@@ -62,21 +51,19 @@ def analyze_review(text: str) -> ReviewAnalysis:
     """Analyze this movie review:
     - Overall sentiment (positive/negative/neutral)
     - Rating on a scale of 1.0 to 5.0
-    - Key points from the review
+    - Key points
 
     Review: {text}"""
 
 result = analyze_review("A groundbreaking sci-fi film...")
-print(result.sentiment)    # "positive"
-print(result.rating)       # 4.5
-print(result.key_points)   # ["groundbreaking visual effects", ...]
+result.sentiment    # "positive"
+result.rating       # 4.5
+result.key_points   # ["groundbreaking visual effects", ...]
 ```
 
-If the provider supports native structured output (like OpenAI's `response_format`), it's used automatically. If not, the library falls back to JSON prompting and parses the response -- no errors, no extra configuration.
+The library generates a JSON schema from the Pydantic model and uses the provider's native structured output (e.g. OpenAI's `response_format`). If the provider doesn't support it, it falls back to JSON prompting automatically.
 
-## Returning generic types
-
-`List[...]` and `Dict[...]` also trigger structured output automatically:
+`List[...]` and `Dict[...]` work the same way:
 
 ```python
 from typing import List
@@ -85,25 +72,28 @@ from typing import List
 def list_steps(task: str) -> List[str]:
     """List the steps to complete this task: {task}"""
 
-steps = list_steps("bake a cake")
-# ["Preheat oven", "Mix dry ingredients", ...]
+list_steps("bake a cake")
+# ["Preheat oven to 350F", "Mix dry ingredients", ...]
 ```
 
-## Multimodal (images)
+## Images
 
-Use the `Image` type for vision tasks:
+`Image` parameters are detected by type and attached to the API call as vision inputs. The docstring is the text part of the prompt:
 
 ```python
 from llm_markdown import prompt, Image
 
 @prompt(provider)
-def describe(image: Image) -> str:
-    """Describe this image in detail."""
+def answer_about_image(image: Image, question: str) -> str:
+    """Answer this question about the image: {question}"""
 
-result = describe(Image("https://example.com/photo.jpg"))
+answer_about_image(
+    image=Image("https://example.com/chart.png"),
+    question="What trend does this chart show?",
+)
 ```
 
-`Image` accepts URLs, base64 strings, or data URIs. Multiple images are supported via `List[Image]`.
+`Image` accepts URLs, base64 strings, or data URIs. Use `List[Image]` for multiple images.
 
 ## Streaming
 
@@ -116,9 +106,9 @@ for chunk in tell_story("a robot learning to paint"):
     print(chunk, end="", flush=True)
 ```
 
-## Async support
+## Async
 
-All decorated functions can be async:
+Async functions work the same way:
 
 ```python
 @prompt(provider)
@@ -128,9 +118,9 @@ async def analyze(text: str) -> str:
 result = await analyze("some text")
 ```
 
-## Langfuse integration
+## Observability with Langfuse
 
-Wrap any provider with `LangfuseWrapper` for automatic logging and cost tracking:
+Wrap any provider with `LangfuseWrapper` to log every call:
 
 ```python
 from llm_markdown.providers import OpenAIProvider, LangfuseWrapper
@@ -144,15 +134,15 @@ provider = LangfuseWrapper(
 
 @prompt(
     provider,
-    langfuse_metadata={"category": "movie-reviews", "use_case": "sentiment-analysis"},
+    langfuse_metadata={"category": "reviews", "use_case": "sentiment"},
 )
 def analyze(text: str) -> str:
     """Analyze: {text}"""
 ```
 
-## Provider interface
+## Custom providers
 
-`OpenAIProvider` auto-detects the correct token parameter for all model families (GPT-4o, GPT-5, o1/o3/o4 series). To add a custom provider, subclass `LLMProvider`:
+Subclass `LLMProvider` to use any LLM backend:
 
 ```python
 from llm_markdown.providers import LLMProvider
@@ -164,31 +154,17 @@ class MyProvider(LLMProvider):
     async def complete_async(self, messages, **kwargs):
         ...  # return response string
 
-    # Optional: override for native structured output support.
-    # If not implemented, the decorator falls back to JSON prompting.
+    # Optional -- enables native structured output.
+    # Without this, the decorator falls back to JSON prompting.
     def complete_structured(self, messages, schema):
         ...  # return parsed dict
 ```
 
+`OpenAIProvider` handles all OpenAI model families (GPT-4o, GPT-5, o1/o3/o4) and auto-detects the correct token parameter.
+
 ## Testing
 
-Run the unit tests (no API key needed):
-
 ```bash
-pip install -e ".[test]"
-pytest
+pytest                                          # unit tests (no API key)
+OPENAI_API_KEY=sk-... pytest -m integration     # real API tests
 ```
-
-Run integration tests against the real OpenAI API:
-
-```bash
-OPENAI_API_KEY=sk-... pytest -m integration
-```
-
-## Migration from v0.2.0
-
-- The `reasoning_first` parameter has been removed. The decorator now automatically chooses between plain completion and structured output based on the return type annotation.
-- Pydantic models, `List[...]`, and `Dict[...]` return types trigger structured output. Primitive types (`str`, `int`, `float`, `bool`) use plain completion.
-- The `{"reasoning": "...", "answer": ...}` JSON envelope is gone. Structured output schemas now match the return type directly.
-- Providers that don't implement `complete_structured()` now get a graceful fallback (JSON prompting via `complete()`) instead of `NotImplementedError`.
-- `provider` is still a keyword-only argument in `@prompt(provider=...)`.

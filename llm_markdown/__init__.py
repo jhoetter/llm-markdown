@@ -3,14 +3,20 @@ __version__ = "0.3.1"
 import inspect
 import json
 import base64
+import binascii
+import mimetypes
+import os
 import re
 import requests
 from urllib.parse import urlparse
-from typing import get_type_hints, get_origin, get_args, List, Dict, Any
+from dataclasses import dataclass
+from typing import get_type_hints, get_origin, get_args, List, Dict, Any, Generic, TypeVar
 from pydantic import BaseModel
 import logging
 
 logger = logging.getLogger(__name__)
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+T = TypeVar("T")
 
 
 # ---------------------------------------------------------------------------
@@ -25,26 +31,63 @@ def _is_url(string: str) -> bool:
         return False
 
 
+def _decode_base64_image(source: str) -> bytes:
+    try:
+        decoded = base64.b64decode(source, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError(
+            "Image source must be a URL, local file path, data URI, or base64-encoded string"
+        ) from exc
+    if not decoded:
+        raise ValueError("Image source cannot be empty")
+    if len(decoded) > _MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"Image payload exceeds {_MAX_IMAGE_BYTES // (1024 * 1024)}MB limit"
+        )
+    return decoded
+
+
+def _validate_image_content(content_type: str, payload: bytes):
+    if not content_type.startswith("image/"):
+        raise ValueError(f"Unsupported image media type: {content_type}")
+    if len(payload) > _MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"Image payload exceeds {_MAX_IMAGE_BYTES // (1024 * 1024)}MB limit"
+        )
+
+
 def _to_data_uri(source: str) -> str:
     """Convert a URL, file path, or raw base64 string into a data URI."""
     if _is_url(source):
-        response = requests.get(source)
+        response = requests.get(source, timeout=30)
         response.raise_for_status()
         content_type = response.headers.get("content-type", "image/jpeg")
+        content_type = content_type.split(";", 1)[0]
+        _validate_image_content(content_type, response.content)
         b64 = base64.b64encode(response.content).decode("utf-8")
         return f"data:{content_type};base64,{b64}"
 
+    if os.path.isfile(source):
+        with open(source, "rb") as image_file:
+            image_bytes = image_file.read()
+        guessed, _ = mimetypes.guess_type(source)
+        content_type = guessed or "image/jpeg"
+        _validate_image_content(content_type, image_bytes)
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        return f"data:{content_type};base64,{b64}"
+
     if source.startswith("data:"):
+        if ";base64," not in source:
+            raise ValueError("Data URI image source must include base64 payload")
+        prefix, encoded = source.split(";base64,", 1)
+        content_type = prefix.replace("data:", "", 1) or "image/jpeg"
+        decoded = _decode_base64_image(encoded)
+        _validate_image_content(content_type, decoded)
         return source
 
     # Assume raw base64
-    try:
-        base64.b64decode(source)
-        return f"data:image/jpeg;base64,{source}"
-    except Exception:
-        raise ValueError(
-            "Image source must be a URL, data URI, or base64-encoded string"
-        )
+    _decode_base64_image(source)
+    return f"data:image/jpeg;base64,{source}"
 
 
 class Image:
@@ -64,6 +107,21 @@ class Image:
     def __repr__(self) -> str:
         preview = self.source[:60] + "..." if len(self.source) > 60 else self.source
         return f"Image({preview!r})"
+
+
+@dataclass(frozen=True)
+class PromptResult(Generic[T]):
+    """Output wrapper for prompt calls when metadata is requested."""
+
+    output: T
+    metadata: dict[str, Any] | None
+
+
+def get_last_response_metadata(provider) -> dict[str, Any] | None:
+    """Return metadata from the most recent provider call."""
+    if hasattr(provider, "last_response_metadata"):
+        return provider.last_response_metadata()
+    return getattr(provider, "_last_response_metadata", None)
 
 
 # ---------------------------------------------------------------------------
@@ -269,10 +327,14 @@ class _PromptDecorator:
         provider,
         stream: bool = False,
         langfuse_metadata: dict | None = None,
+        generation_options: dict | None = None,
+        return_metadata: bool = False,
     ):
         self.provider = provider
         self.stream = stream
         self.langfuse_metadata = langfuse_metadata or {}
+        self.generation_options = generation_options or {}
+        self.return_metadata = return_metadata
 
     # -- prompt & message building ---------------------------------------
 
@@ -315,9 +377,28 @@ class _PromptDecorator:
                     images.extend(v for v in val if isinstance(v, Image))
         return images
 
+    @staticmethod
+    def _split_runtime_options(kwargs: dict) -> tuple[dict, dict]:
+        runtime_kwargs = dict(kwargs)
+        runtime_options = runtime_kwargs.pop("_llm_options", None) or {}
+        if not isinstance(runtime_options, dict):
+            raise TypeError("_llm_options must be a dict when provided")
+        return runtime_kwargs, runtime_options
+
+    def _merged_generation_options(self, runtime_options: dict) -> dict:
+        merged = dict(self.generation_options)
+        merged.update(runtime_options)
+        return merged
+
+    def _finalize_output(self, result):
+        if not self.return_metadata:
+            return result
+        metadata = get_last_response_metadata(self.provider)
+        return PromptResult(output=result, metadata=metadata)
+
     # -- execution paths -------------------------------------------------
 
-    def _execute_structured(self, messages: list[dict], return_type):
+    def _execute_structured(self, messages: list[dict], return_type, generation_options: dict):
         """Structured output path via complete_structured."""
         schema = _build_schema(return_type)
         sys_msg = _system_instructions(return_type)
@@ -325,11 +406,15 @@ class _PromptDecorator:
             {"role": "system", "content": sys_msg},
             messages[-1],
         ]
-        result = self.provider.complete_structured(structured_messages, schema)
+        result = self.provider.complete_structured(
+            structured_messages, schema, **generation_options
+        )
         logger.debug(f"Structured output: {result}")
         return _parse_response(result, return_type)
 
-    async def _execute_structured_async(self, messages: list[dict], return_type):
+    async def _execute_structured_async(
+        self, messages: list[dict], return_type, generation_options: dict
+    ):
         """Async structured output path via complete_structured_async."""
         schema = _build_schema(return_type)
         sys_msg = _system_instructions(return_type)
@@ -338,19 +423,23 @@ class _PromptDecorator:
             messages[-1],
         ]
         result = await self.provider.complete_structured_async(
-            structured_messages, schema
+            structured_messages, schema, **generation_options
         )
         logger.debug(f"Structured output: {result}")
         return _parse_response(result, return_type)
 
-    def _execute_json_fallback(self, messages: list[dict], return_type):
+    def _execute_json_fallback(self, messages: list[dict], return_type, generation_options: dict):
         """Fallback: ask for JSON via system prompt, parse the text response."""
         sys_msg = _system_instructions(return_type)
         fallback_messages = [
             {"role": "system", "content": sys_msg},
             messages[-1],
         ]
-        raw = self.provider.complete(fallback_messages, stream=False)
+        raw = self.provider.complete(
+            fallback_messages,
+            stream=False,
+            **generation_options,
+        )
         raw = raw.strip()
         logger.debug(f"JSON fallback response:\n{raw}")
         try:
@@ -359,14 +448,20 @@ class _PromptDecorator:
         except json.JSONDecodeError:
             return _parse_response(raw, return_type)
 
-    async def _execute_json_fallback_async(self, messages: list[dict], return_type):
+    async def _execute_json_fallback_async(
+        self, messages: list[dict], return_type, generation_options: dict
+    ):
         """Async fallback: ask for JSON via system prompt, parse the text response."""
         sys_msg = _system_instructions(return_type)
         fallback_messages = [
             {"role": "system", "content": sys_msg},
             messages[-1],
         ]
-        raw = await self.provider.complete_async(fallback_messages, stream=False)
+        raw = await self.provider.complete_async(
+            fallback_messages,
+            stream=False,
+            **generation_options,
+        )
         raw = raw.strip()
         logger.debug(f"JSON fallback response:\n{raw}")
         try:
@@ -385,7 +480,9 @@ class _PromptDecorator:
             async def async_wrapper(*args, **kwargs):
                 return_type = hints.get("return")
                 sig = inspect.signature(func)
-                bound = sig.bind(*args, **kwargs)
+                runtime_kwargs, runtime_options = self._split_runtime_options(kwargs)
+                generation_options = self._merged_generation_options(runtime_options)
+                bound = sig.bind(*args, **runtime_kwargs)
                 bound.apply_defaults()
 
                 prompt_text = self._extract_prompt(func, bound.arguments)
@@ -402,27 +499,39 @@ class _PromptDecorator:
 
                 if self.stream:
                     return await self.provider.complete_async(
-                        messages, stream=True
+                        messages,
+                        stream=True,
+                        **generation_options,
                     )
 
                 if _needs_structured_output(return_type):
                     try:
-                        return await self._execute_structured_async(
-                            messages, return_type
+                        structured = await self._execute_structured_async(
+                            messages,
+                            return_type,
+                            generation_options,
                         )
+                        return self._finalize_output(structured)
                     except NotImplementedError:
                         logger.debug(
                             f"{type(self.provider).__name__} does not support "
                             "structured output, falling back to JSON prompting"
                         )
-                        return await self._execute_json_fallback_async(
-                            messages, return_type
+                        fallback = await self._execute_json_fallback_async(
+                            messages,
+                            return_type,
+                            generation_options,
                         )
+                        return self._finalize_output(fallback)
 
-                raw = await self.provider.complete_async(messages, stream=False)
+                raw = await self.provider.complete_async(
+                    messages,
+                    stream=False,
+                    **generation_options,
+                )
                 raw = raw.strip()
                 logger.debug(f"Raw LLM response:\n{raw}")
-                return _parse_response(raw, return_type)
+                return self._finalize_output(_parse_response(raw, return_type))
 
             async_wrapper.__name__ = func.__name__
             async_wrapper.__doc__ = func.__doc__
@@ -431,7 +540,9 @@ class _PromptDecorator:
             def wrapper(*args, **kwargs):
                 return_type = hints.get("return")
                 sig = inspect.signature(func)
-                bound = sig.bind(*args, **kwargs)
+                runtime_kwargs, runtime_options = self._split_runtime_options(kwargs)
+                generation_options = self._merged_generation_options(runtime_options)
+                bound = sig.bind(*args, **runtime_kwargs)
                 bound.apply_defaults()
 
                 prompt_text = self._extract_prompt(func, bound.arguments)
@@ -447,22 +558,40 @@ class _PromptDecorator:
                     self.provider.set_request_metadata(self.langfuse_metadata)
 
                 if self.stream:
-                    return self.provider.complete(messages, stream=True)
+                    return self.provider.complete(
+                        messages,
+                        stream=True,
+                        **generation_options,
+                    )
 
                 if _needs_structured_output(return_type):
                     try:
-                        return self._execute_structured(messages, return_type)
+                        structured = self._execute_structured(
+                            messages,
+                            return_type,
+                            generation_options,
+                        )
+                        return self._finalize_output(structured)
                     except NotImplementedError:
                         logger.debug(
                             f"{type(self.provider).__name__} does not support "
                             "structured output, falling back to JSON prompting"
                         )
-                        return self._execute_json_fallback(messages, return_type)
+                        fallback = self._execute_json_fallback(
+                            messages,
+                            return_type,
+                            generation_options,
+                        )
+                        return self._finalize_output(fallback)
 
-                raw = self.provider.complete(messages, stream=False)
+                raw = self.provider.complete(
+                    messages,
+                    stream=False,
+                    **generation_options,
+                )
                 raw = raw.strip()
                 logger.debug(f"Raw LLM response:\n{raw}")
-                return _parse_response(raw, return_type)
+                return self._finalize_output(_parse_response(raw, return_type))
 
             wrapper.__name__ = func.__name__
             wrapper.__doc__ = func.__doc__
@@ -474,6 +603,8 @@ def prompt(
     *,
     stream: bool = False,
     langfuse_metadata: dict | None = None,
+    generation_options: dict | None = None,
+    return_metadata: bool = False,
 ):
     """Decorator factory that turns a function's docstring into an LLM prompt.
 
@@ -490,15 +621,23 @@ def prompt(
         provider: An LLMProvider instance.
         stream: If True, return a streaming iterator instead of a complete response.
         langfuse_metadata: Optional metadata dict passed to LangfuseWrapper.
+        generation_options: Default provider options passed to each call
+            (for example ``temperature``, ``top_p``, ``max_tokens``).
+        return_metadata: If True, return ``PromptResult`` with output + metadata.
 
     Example::
 
         @prompt(provider=my_provider)
         def summarize(text: str) -> str:
             \"\"\"Summarize this text in 2 sentences: {text}\"\"\"
+
+        # Per-call overrides:
+        summarize("text", _llm_options={"temperature": 0.2})
     """
     return _PromptDecorator(
         provider=provider,
         stream=stream,
         langfuse_metadata=langfuse_metadata,
+        generation_options=generation_options,
+        return_metadata=return_metadata,
     )

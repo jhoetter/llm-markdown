@@ -3,10 +3,15 @@
 LLM calls as Python functions. Write a docstring, add a type hint, done.
 
 ```python
+import os
+
 from llm_markdown import prompt
 from llm_markdown.providers import OpenAIProvider
 
-provider = OpenAIProvider(api_key="sk-...", model="gpt-4o-mini")
+provider = OpenAIProvider(
+    api_key=os.environ["OPENAI_API_KEY"],
+    model="gpt-4o-mini",
+)
 
 @prompt(provider)
 def summarize(text: str) -> str:
@@ -62,6 +67,8 @@ pip install llm-markdown[all]
 Instantiate providers:
 
 ```python
+import os
+
 from llm_markdown.providers import (
     OpenAIProvider,
     AnthropicProvider,
@@ -69,11 +76,11 @@ from llm_markdown.providers import (
     OpenRouterProvider,
 )
 
-openai_provider = OpenAIProvider(api_key="sk-...", model="gpt-4o-mini")
-anthropic_provider = AnthropicProvider(api_key="sk-ant-...", model="claude-3-5-sonnet-latest")
-gemini_provider = GeminiProvider(api_key="AIza...", model="gemini-2.0-flash")
+openai_provider = OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"], model="gpt-4o-mini")
+anthropic_provider = AnthropicProvider(api_key=os.environ["ANTHROPIC_API_KEY"], model="claude-3-5-sonnet-latest")
+gemini_provider = GeminiProvider(api_key=os.environ["GOOGLE_API_KEY"], model="gemini-2.0-flash")
 openrouter_provider = OpenRouterProvider(
-    api_key="sk-or-...",
+    api_key=os.environ["OPENROUTER_API_KEY"],
     model="openai/gpt-4o-mini",
     app_name="llm-markdown",
     app_url="https://example.com",
@@ -139,7 +146,7 @@ answer_about_image(
 )
 ```
 
-`Image` accepts URLs, base64 strings, or data URIs. Use `List[Image]` for multiple images.
+`Image` accepts URLs, local file paths, base64 strings, or data URIs. Non-image content types and payloads above 20MB are rejected. Use `List[Image]` for multiple images.
 
 ## Streaming
 
@@ -164,17 +171,42 @@ async def analyze(text: str) -> str:
 result = await analyze("some text")
 ```
 
+## Generation controls and metadata
+
+Pass default generation controls at decoration time and override per call with `_llm_options`:
+
+```python
+from llm_markdown import prompt, PromptResult
+
+@prompt(
+    provider,
+    generation_options={"temperature": 0.4, "max_tokens": 300},
+    return_metadata=True,
+)
+def summarize(text: str) -> str:
+    """Summarize: {text}"""
+
+result: PromptResult[str] = summarize(
+    "Some article",
+    _llm_options={"temperature": 0.2},
+)
+print(result.output)
+print(result.metadata)  # provider/model/response_id/usage
+```
+
 ## Observability with Langfuse
 
 Wrap any provider with `LangfuseWrapper` to log every call:
 
 ```python
+import os
+
 from llm_markdown.providers import OpenAIProvider, LangfuseWrapper
 
 provider = LangfuseWrapper(
-    provider=OpenAIProvider(api_key="sk-..."),
-    secret_key="sk-lf-...",
-    public_key="pk-lf-...",
+    provider=OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"]),
+    secret_key=os.environ["LANGFUSE_SECRET_KEY"],
+    public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
     host="https://cloud.langfuse.com",
 )
 
@@ -202,7 +234,7 @@ class MyProvider(LLMProvider):
 
     # Optional -- enables native structured output.
     # Without this, the decorator falls back to JSON prompting.
-    def complete_structured(self, messages, schema):
+    def complete_structured(self, messages, schema, **kwargs):
         ...  # return parsed dict
 ```
 
@@ -216,10 +248,11 @@ Built-in providers:
 ## Testing
 
 ```bash
-pytest                          # unit tests (no API key)
+pytest -m "not integration"      # required quality gate before commit
 cp .env.example .env           # fill provider keys
 set -a; source .env; set +a
-pytest -m integration           # real provider API tests
+pytest -m integration           # optional real provider API tests
+python -m build                 # required quality gate before push
 ```
 
 Required keys for provider integration tests:
@@ -230,3 +263,36 @@ Required keys for provider integration tests:
 - `OPENROUTER_API_KEY`
 
 Integration tests run against a curated model set per provider and skip individual model cases if a model is not enabled for the key/account.
+
+## Troubleshooting
+
+- `ImportError` for provider packages: install matching extras (`llm-markdown[openai]`, `llm-markdown[anthropic]`, `llm-markdown[gemini]`, `llm-markdown[openrouter]`).
+- Missing function docstring: every `@prompt` function needs a docstring prompt template.
+- Structured outputs not supported by provider: the decorator automatically falls back to JSON prompting.
+- `stream=True` returns a stream iterator and bypasses structured parsing.
+- Image issues: URLs/local files must resolve to an image MIME type, and payloads above 20MB are rejected.
+
+## Security notes
+
+- Keep secrets in environment variables (`.env`) and never hardcode keys in source.
+- Do not commit `.env` files or raw credentials.
+- Treat remote image URLs as untrusted input; prefer trusted sources for production.
+
+## Versioning and release
+
+- Project version currently lives in `llm_markdown/__init__.py` and `setup.py`.
+- Document user-visible changes in release notes or PR descriptions.
+- Before publishing, run `pytest -m "not integration"` and `python -m build`.
+
+## Additional docs
+
+- `docs/getting-started.md`
+- `docs/providers.md`
+- `docs/structured-output.md`
+- `docs/images-and-multimodal.md`
+- `docs/streaming-and-async.md`
+- `docs/troubleshooting.md`
+- `docs/security.md`
+- `docs/contributing.md`
+- `docs/versioning.md`
+- `docs/strategic-bets.md`

@@ -61,7 +61,23 @@ def test_to_data_uri_fetches_url():
 
         result = _to_data_uri("https://example.com/photo.jpg")
         assert result.startswith("data:image/png;base64,")
-        mock_get.assert_called_once_with("https://example.com/photo.jpg")
+        mock_get.assert_called_once_with("https://example.com/photo.jpg", timeout=30)
+
+
+def test_to_data_uri_reads_local_file(tmp_path):
+    image_file = tmp_path / "sample.png"
+    image_file.write_bytes(b"fake-image")
+    result = _to_data_uri(str(image_file))
+    assert result.startswith("data:image/png;base64,")
+
+
+def test_to_data_uri_rejects_non_image_content_type():
+    with patch("llm_markdown.requests.get") as mock_get:
+        mock_get.return_value.content = b"not image"
+        mock_get.return_value.headers = {"content-type": "application/json"}
+        mock_get.return_value.raise_for_status = lambda: None
+        with pytest.raises(ValueError, match="Unsupported image media type"):
+            _to_data_uri("https://example.com/not-image")
 
 
 # ---- Image class -----------------------------------------------------------
@@ -98,7 +114,7 @@ def test_collect_single_image():
 
 
 def test_collect_list_of_images():
-    imgs = [Image("data:image/png;base64,a"), Image("data:image/png;base64,b")]
+    imgs = [Image("data:image/png;base64,YQ=="), Image("data:image/png;base64,Yg==")]
     hints = {"images": List[Image], "return": str}
     args = {"images": imgs}
     result = _PromptDecorator._collect_images(args, hints)
@@ -137,8 +153,8 @@ def test_build_message_with_images():
 
 def test_build_message_with_multiple_images():
     imgs = [
-        Image("data:image/png;base64,a"),
-        Image("data:image/png;base64,b"),
+        Image("data:image/png;base64,YQ=="),
+        Image("data:image/png;base64,Yg=="),
     ]
     result = _PromptDecorator._build_user_message("compare", imgs)
     assert isinstance(result, list)

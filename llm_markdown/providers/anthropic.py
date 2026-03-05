@@ -26,7 +26,15 @@ class AnthropicProvider(LLMProvider):
         api_key: str,
         model: str = "claude-3-5-sonnet-latest",
         max_tokens: int = 4096,
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 0.5,
     ):
+        super().__init__(
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+        )
         try:
             anthropic = importlib.import_module("anthropic")
         except ImportError as exc:
@@ -38,7 +46,6 @@ class AnthropicProvider(LLMProvider):
         self.api_key = api_key
         self.model = model
         self.max_tokens = max_tokens
-        self._last_usage = None
         self.client = anthropic.Anthropic(api_key=api_key)
         self.async_client = anthropic.AsyncAnthropic(api_key=api_key)
 
@@ -106,18 +113,28 @@ class AnthropicProvider(LLMProvider):
             "total_tokens": (input_tokens or 0) + (output_tokens or 0),
         }
 
+    def _request_options(self, kwargs: dict) -> dict:
+        options = dict(kwargs)
+        options.pop("stream", None)
+        options["max_tokens"] = options.pop("max_tokens", self.max_tokens)
+        options["timeout"] = self.retry_config.timeout_seconds
+        return options
+
     def complete(
         self, messages: list[dict], **kwargs
     ) -> Union[str, Iterator[str]]:
         stream = kwargs.get("stream", False)
         system, anthropic_messages = self._to_anthropic_messages(messages)
+        request_kwargs = self._request_options(kwargs)
 
         if stream:
-            stream_resp = self.client.messages.stream(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=system or None,
-                messages=anthropic_messages,
+            stream_resp = self._call_with_retries(
+                lambda: self.client.messages.stream(
+                    model=self.model,
+                    system=system or None,
+                    messages=anthropic_messages,
+                    **request_kwargs,
+                )
             )
 
             def _gen():
@@ -126,16 +143,30 @@ class AnthropicProvider(LLMProvider):
                         yield text
                     final_message = s.get_final_message()
                     self._set_usage(getattr(final_message, "usage", None))
+                    self._last_response_metadata = {
+                        "provider": type(self).__name__,
+                        "model": self.model,
+                        "response_id": getattr(final_message, "id", None),
+                        "usage": self._last_usage,
+                    }
 
             return _gen()
 
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system or None,
-            messages=anthropic_messages,
+        response = self._call_with_retries(
+            lambda: self.client.messages.create(
+                model=self.model,
+                system=system or None,
+                messages=anthropic_messages,
+                **request_kwargs,
+            )
         )
         self._set_usage(getattr(response, "usage", None))
+        self._last_response_metadata = {
+            "provider": type(self).__name__,
+            "model": self.model,
+            "response_id": getattr(response, "id", None),
+            "usage": self._last_usage,
+        }
         text_parts = [
             block.text for block in response.content if getattr(block, "type", "") == "text"
         ]
@@ -159,40 +190,60 @@ class AnthropicProvider(LLMProvider):
             return _gen()
 
         system, anthropic_messages = self._to_anthropic_messages(messages)
-        response = await self.async_client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system or None,
-            messages=anthropic_messages,
+        request_kwargs = self._request_options(kwargs)
+        response = await self._acall_with_retries(
+            lambda: self.async_client.messages.create(
+                model=self.model,
+                system=system or None,
+                messages=anthropic_messages,
+                **request_kwargs,
+            )
         )
         self._set_usage(getattr(response, "usage", None))
+        self._last_response_metadata = {
+            "provider": type(self).__name__,
+            "model": self.model,
+            "response_id": getattr(response, "id", None),
+            "usage": self._last_usage,
+        }
         text_parts = [
             block.text for block in response.content if getattr(block, "type", "") == "text"
         ]
         return "".join(text_parts)
 
-    def complete_structured(self, messages: list[dict], schema: dict) -> dict:
+    def complete_structured(self, messages: list[dict], schema: dict, **kwargs) -> dict:
         system, anthropic_messages = self._to_anthropic_messages(messages)
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system or None,
-            messages=anthropic_messages,
-            tools=[
-                {
-                    "name": "structured_response",
-                    "description": "Return a structured response matching the schema.",
-                    "input_schema": schema,
-                }
-            ],
-            tool_choice={"type": "tool", "name": "structured_response"},
+        request_kwargs = self._request_options(kwargs)
+        response = self._call_with_retries(
+            lambda: self.client.messages.create(
+                model=self.model,
+                system=system or None,
+                messages=anthropic_messages,
+                tools=[
+                    {
+                        "name": "structured_response",
+                        "description": "Return a structured response matching the schema.",
+                        "input_schema": schema,
+                    }
+                ],
+                tool_choice={"type": "tool", "name": "structured_response"},
+                **request_kwargs,
+            )
         )
         self._set_usage(getattr(response, "usage", None))
+        self._last_response_metadata = {
+            "provider": type(self).__name__,
+            "model": self.model,
+            "response_id": getattr(response, "id", None),
+            "usage": self._last_usage,
+        }
         for block in response.content:
             if getattr(block, "type", "") == "tool_use":
                 return getattr(block, "input", {})
         raise ValueError("Anthropic structured output did not return a tool_use payload.")
 
-    async def complete_structured_async(self, messages: list[dict], schema: dict) -> dict:
+    async def complete_structured_async(
+        self, messages: list[dict], schema: dict, **kwargs
+    ) -> dict:
         # AsyncAnthropic tool-use endpoint behavior matches sync path.
-        return await asyncio.to_thread(self.complete_structured, messages, schema)
+        return await asyncio.to_thread(self.complete_structured, messages, schema, **kwargs)

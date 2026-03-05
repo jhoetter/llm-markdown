@@ -17,6 +17,7 @@ class LangfuseWrapper(LLMProvider):
         public_key: str,
         host: str = "https://cloud.langfuse.com",
     ):
+        super().__init__()
         self.provider = provider
         import os
 
@@ -66,6 +67,9 @@ class LangfuseWrapper(LLMProvider):
         if not stream:
             usage = getattr(self.provider, "_last_usage", None)
             self._log_generation("llm_complete", messages, response, usage)
+            self._last_response_metadata = getattr(
+                self.provider, "_last_response_metadata", None
+            )
             return response
 
         def _wrapped():
@@ -76,6 +80,9 @@ class LangfuseWrapper(LLMProvider):
             full = "".join(chunks)
             usage = getattr(self.provider, "_last_usage", None)
             self._log_generation("llm_complete", messages, full, usage)
+            self._last_response_metadata = getattr(
+                self.provider, "_last_response_metadata", None
+            )
 
         return _wrapped()
 
@@ -88,6 +95,9 @@ class LangfuseWrapper(LLMProvider):
         if not stream:
             usage = getattr(self.provider, "_last_usage", None)
             self._log_generation("llm_complete_async", messages, response, usage)
+            self._last_response_metadata = getattr(
+                self.provider, "_last_response_metadata", None
+            )
             return response
 
         async def _wrapped():
@@ -98,26 +108,35 @@ class LangfuseWrapper(LLMProvider):
             full = "".join(chunks)
             usage = getattr(self.provider, "_last_usage", None)
             self._log_generation("llm_complete_async", messages, full, usage)
+            self._last_response_metadata = getattr(
+                self.provider, "_last_response_metadata", None
+            )
 
         return _wrapped()
 
     # -- structured output -----------------------------------------------
 
-    def complete_structured(self, messages: list[dict], schema: dict) -> dict:
-        result = self.provider.complete_structured(messages, schema)
+    def complete_structured(self, messages: list[dict], schema: dict, **kwargs) -> dict:
+        result = self.provider.complete_structured(messages, schema, **kwargs)
         usage = getattr(self.provider, "_last_usage", None)
         self._log_generation(
             "llm_complete_structured", messages, json.dumps(result), usage
         )
+        self._last_response_metadata = getattr(
+            self.provider, "_last_response_metadata", None
+        )
         return result
 
     async def complete_structured_async(
-        self, messages: list[dict], schema: dict
+        self, messages: list[dict], schema: dict, **kwargs
     ) -> dict:
-        result = await self.provider.complete_structured_async(messages, schema)
+        result = await self.provider.complete_structured_async(messages, schema, **kwargs)
         usage = getattr(self.provider, "_last_usage", None)
         self._log_generation(
             "llm_complete_structured_async", messages, json.dumps(result), usage
+        )
+        self._last_response_metadata = getattr(
+            self.provider, "_last_response_metadata", None
         )
         return result
 

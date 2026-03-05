@@ -66,6 +66,7 @@ def test_anthropic_provider_structured_tool_use(monkeypatch):
     )
     assert result == {"answer": "ok"}
     assert provider._last_usage["total_tokens"] == 15
+    assert provider.last_response_metadata()["provider"] == "AnthropicProvider"
 
 
 @pytest.mark.asyncio
@@ -122,6 +123,7 @@ async def test_gemini_provider_stream_and_structured(monkeypatch):
         schema={"type": "object", "properties": {"sentiment": {"type": "string"}}},
     )
     assert structured["sentiment"] == "positive"
+    assert provider.last_response_metadata()["provider"] == "GeminiProvider"
 
     stream = await provider.complete_async([{"role": "user", "content": "stream"}], stream=True)
     chunks = [chunk async for chunk in stream]

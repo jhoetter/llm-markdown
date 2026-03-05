@@ -51,7 +51,15 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int = 4096,
         base_url: str | None = None,
         default_headers: dict | None = None,
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 0.5,
     ):
+        super().__init__(
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+        )
         self.api_key = api_key
         self.model = model
         self.max_tokens = max_tokens
@@ -71,8 +79,30 @@ class OpenAIProvider(LLMProvider):
             default_headers=self.default_headers or None,
         )
 
-    def _token_kwargs(self) -> dict:
-        return {self._token_param: self.max_tokens}
+    def _token_kwargs(self, options: dict | None = None) -> dict:
+        options = options or {}
+        max_tokens = options.pop("max_tokens", self.max_tokens)
+        token_kwargs = {self._token_param: max_tokens}
+        if self._token_param == "max_completion_tokens" and "max_completion_tokens" in options:
+            token_kwargs["max_completion_tokens"] = options.pop("max_completion_tokens")
+        if self._token_param == "max_tokens" and "max_completion_tokens" in options:
+            token_kwargs["max_tokens"] = options.pop("max_completion_tokens")
+        return token_kwargs
+
+    def _capture_metadata(self, response):
+        self._last_response_metadata = {
+            "provider": type(self).__name__,
+            "model": self.model,
+            "response_id": getattr(response, "id", None),
+            "usage": self._last_usage,
+        }
+
+    def _request_options(self, kwargs: dict) -> dict:
+        options = dict(kwargs)
+        options.pop("stream", None)
+        token_kwargs = self._token_kwargs(options)
+        options["timeout"] = self.retry_config.timeout_seconds
+        return {**token_kwargs, **options}
 
     # -- core completions ------------------------------------------------
 
@@ -80,11 +110,14 @@ class OpenAIProvider(LLMProvider):
         self, messages: list[dict], **kwargs
     ) -> Union[str, Iterator[str]]:
         stream = kwargs.get("stream", False)
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            stream=stream,
-            **self._token_kwargs(),
+        request_kwargs = self._request_options(kwargs)
+        response = self._call_with_retries(
+            lambda: self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=stream,
+                **request_kwargs,
+            )
         )
 
         if stream:
@@ -95,20 +128,30 @@ class OpenAIProvider(LLMProvider):
                         yield chunk.choices[0].delta.content
                     last_chunk = chunk
                 self._last_usage = _extract_chunk_usage(last_chunk)
+                self._last_response_metadata = {
+                    "provider": type(self).__name__,
+                    "model": self.model,
+                    "response_id": getattr(last_chunk, "id", None),
+                    "usage": self._last_usage,
+                }
             return _gen()
 
         self._last_usage = _extract_usage(response)
+        self._capture_metadata(response)
         return response.choices[0].message.content
 
     async def complete_async(
         self, messages: list[dict], **kwargs
     ) -> Union[str, AsyncIterator[str]]:
         stream = kwargs.get("stream", False)
-        response = await self.async_client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            stream=stream,
-            **self._token_kwargs(),
+        request_kwargs = self._request_options(kwargs)
+        response = await self._acall_with_retries(
+            lambda: self.async_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=stream,
+                **request_kwargs,
+            )
         )
 
         if stream:
@@ -119,47 +162,62 @@ class OpenAIProvider(LLMProvider):
                         yield chunk.choices[0].delta.content
                     last_chunk = chunk
                 self._last_usage = _extract_chunk_usage(last_chunk)
+                self._last_response_metadata = {
+                    "provider": type(self).__name__,
+                    "model": self.model,
+                    "response_id": getattr(last_chunk, "id", None),
+                    "usage": self._last_usage,
+                }
             return _gen()
 
         self._last_usage = _extract_usage(response)
+        self._capture_metadata(response)
         return response.choices[0].message.content
 
     # -- structured output -----------------------------------------------
 
-    def complete_structured(self, messages: list[dict], schema: dict) -> dict:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "structured_response",
-                    "strict": True,
-                    "schema": schema,
+    def complete_structured(self, messages: list[dict], schema: dict, **kwargs) -> dict:
+        request_kwargs = self._request_options(kwargs)
+        response = self._call_with_retries(
+            lambda: self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "structured_response",
+                        "strict": True,
+                        "schema": schema,
+                    },
                 },
-            },
-            **self._token_kwargs(),
+                **request_kwargs,
+            )
         )
         self._last_usage = _extract_usage(response)
+        self._capture_metadata(response)
         return json.loads(response.choices[0].message.content)
 
     async def complete_structured_async(
-        self, messages: list[dict], schema: dict
+        self, messages: list[dict], schema: dict, **kwargs
     ) -> dict:
-        response = await self.async_client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "structured_response",
-                    "strict": True,
-                    "schema": schema,
+        request_kwargs = self._request_options(kwargs)
+        response = await self._acall_with_retries(
+            lambda: self.async_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "structured_response",
+                        "strict": True,
+                        "schema": schema,
+                    },
                 },
-            },
-            **self._token_kwargs(),
+                **request_kwargs,
+            )
         )
         self._last_usage = _extract_usage(response)
+        self._capture_metadata(response)
         return json.loads(response.choices[0].message.content)
 
 

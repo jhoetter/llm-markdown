@@ -3,7 +3,7 @@ from .anthropic import AnthropicProvider
 from .gemini import GeminiProvider
 from .openrouter import OpenRouterProvider
 from .langfuse import LangfuseWrapper
-from .base import LLMProvider
+from .base import LLMProvider, ProviderError
 
 __all__ = [
     "OpenAIProvider",
@@ -13,4 +13,5 @@ __all__ = [
     "OpenRouterProvider",
     "LangfuseWrapper",
     "LLMProvider",
+    "ProviderError",
 ]

@@ -19,6 +19,9 @@ class OpenRouterProvider(OpenAIProvider):
         max_tokens: int = 4096,
         app_name: str | None = None,
         app_url: str | None = None,
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 0.5,
     ):
         headers = {}
         if app_url:
@@ -32,4 +35,7 @@ class OpenRouterProvider(OpenAIProvider):
             max_tokens=max_tokens,
             base_url="https://openrouter.ai/api/v1",
             default_headers=headers or None,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
         )

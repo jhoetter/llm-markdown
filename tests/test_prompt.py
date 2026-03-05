@@ -2,7 +2,7 @@ import pytest
 from pydantic import BaseModel
 from typing import List
 
-from llm_markdown import prompt
+from llm_markdown import prompt, PromptResult
 from tests.conftest import MockProvider, BareProvider
 
 
@@ -246,3 +246,63 @@ def test_default_arguments_work(mock_provider):
     greet("Alice")
     content = mock_provider.calls[0][1][1]["content"]
     assert content == "Say Hi to Alice"
+
+
+def test_generation_options_passed_to_provider(mock_provider):
+    @prompt(provider=mock_provider, generation_options={"temperature": 0.4, "top_p": 0.8})
+    def summarize(text: str) -> str:
+        """Summarize: {text}"""
+
+    summarize("Hello")
+    kwargs = mock_provider.calls[0][2]
+    assert kwargs["temperature"] == 0.4
+    assert kwargs["top_p"] == 0.8
+
+
+def test_runtime_llm_options_override_defaults(mock_provider):
+    @prompt(provider=mock_provider, generation_options={"temperature": 0.4})
+    def summarize(text: str) -> str:
+        """Summarize: {text}"""
+
+    summarize("Hello", _llm_options={"temperature": 0.2, "max_tokens": 120})
+    kwargs = mock_provider.calls[0][2]
+    assert kwargs["temperature"] == 0.2
+    assert kwargs["max_tokens"] == 120
+
+
+def test_return_metadata_wraps_output(mock_provider):
+    @prompt(provider=mock_provider, return_metadata=True)
+    def summarize(text: str) -> str:
+        """Summarize: {text}"""
+
+    result = summarize("Hello")
+    assert isinstance(result, PromptResult)
+    assert result.output == "mock response"
+    assert result.metadata["provider"] == "MockProvider"
+
+
+def test_structured_return_metadata_wraps_output():
+    provider = MockProvider(structured_response={"title": "Matrix", "year": 1999})
+
+    @prompt(provider=provider, return_metadata=True)
+    def get_movie(desc: str) -> Movie:
+        """Find movie: {desc}"""
+
+    result = get_movie("sci-fi classic")
+    assert isinstance(result, PromptResult)
+    assert isinstance(result.output, Movie)
+    assert result.output.title == "Matrix"
+    assert result.metadata["response_id"] == "mock-structured-id"
+
+
+def test_generation_options_passed_to_structured_provider():
+    provider = MockProvider(structured_response={"title": "Matrix", "year": 1999})
+
+    @prompt(provider=provider, generation_options={"temperature": 0.1})
+    def get_movie(desc: str) -> Movie:
+        """Find movie: {desc}"""
+
+    get_movie("sci-fi classic")
+    structured_call = provider.calls[0]
+    assert structured_call[0] == "complete_structured"
+    assert structured_call[3]["temperature"] == 0.1

@@ -10,15 +10,28 @@ class MockProvider(LLMProvider):
         self.calls: list[tuple] = []
         self._response = response
         self._structured = structured_response or response
+        self._last_response_metadata = None
 
     def complete(self, messages, **kwargs):
         self.calls.append(("complete", messages, kwargs))
+        self._last_response_metadata = {
+            "provider": "MockProvider",
+            "model": "mock-model",
+            "response_id": "mock-response-id",
+            "usage": None,
+        }
         if kwargs.get("stream"):
             return iter(list(self._response))
         return self._response
 
     async def complete_async(self, messages, **kwargs):
         self.calls.append(("complete_async", messages, kwargs))
+        self._last_response_metadata = {
+            "provider": "MockProvider",
+            "model": "mock-model",
+            "response_id": "mock-response-id",
+            "usage": None,
+        }
         if kwargs.get("stream"):
             async def _gen():
                 for c in self._response:
@@ -26,12 +39,24 @@ class MockProvider(LLMProvider):
             return _gen()
         return self._response
 
-    def complete_structured(self, messages, schema):
-        self.calls.append(("complete_structured", messages, schema))
+    def complete_structured(self, messages, schema, **kwargs):
+        self.calls.append(("complete_structured", messages, schema, kwargs))
+        self._last_response_metadata = {
+            "provider": "MockProvider",
+            "model": "mock-model",
+            "response_id": "mock-structured-id",
+            "usage": None,
+        }
         return self._structured
 
-    async def complete_structured_async(self, messages, schema):
-        self.calls.append(("complete_structured_async", messages, schema))
+    async def complete_structured_async(self, messages, schema, **kwargs):
+        self.calls.append(("complete_structured_async", messages, schema, kwargs))
+        self._last_response_metadata = {
+            "provider": "MockProvider",
+            "model": "mock-model",
+            "response_id": "mock-structured-id",
+            "usage": None,
+        }
         return self._structured
 
 
@@ -67,7 +92,7 @@ def bare_provider():
 
 def pytest_configure(config):
     config.addinivalue_line(
-        "markers", "integration: tests that hit a real OpenAI API"
+        "markers", "integration: tests that hit real provider APIs"
     )
 
 

@@ -2,7 +2,7 @@
 
 These tests are skipped unless:
   1. The OPENAI_API_KEY environment variable is set, AND
-  2. The test is run with the --run-integration flag or -m integration marker.
+  2. The test is run with the integration marker.
 
 Run them with:
     OPENAI_API_KEY=sk-... pytest tests/test_integration.py -m integration

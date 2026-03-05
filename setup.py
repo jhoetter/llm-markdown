@@ -31,8 +31,11 @@ setup(
     ],
     extras_require={
         "openai": ["openai"],
+        "anthropic": ["anthropic"],
+        "gemini": ["google-genai"],
+        "openrouter": ["openai"],
         "langfuse": ["langfuse"],
         "test": ["pytest", "pytest-asyncio"],
-        "all": ["openai", "langfuse", "python-dotenv"],
+        "all": ["openai", "anthropic", "google-genai", "langfuse", "python-dotenv"],
     },
 )

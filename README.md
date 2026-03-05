@@ -32,7 +32,53 @@ That's it. No configuration flags, no prompt templates, no output parsers. The f
 pip install llm-markdown[openai]
 ```
 
-Other extras: `langfuse` (observability), `all` (everything), `test` (pytest suite).
+Provider extras: `openai`, `anthropic`, `gemini`, `openrouter`.
+
+Other extras: `langfuse` (observability), `all` (all providers + langfuse), `test` (pytest suite).
+
+## Provider support
+
+| Provider | Included | Native structured output | Images | Streaming | Extra |
+| --- | --- | --- | --- | --- | --- |
+| OpenAI | Yes | Yes (`response_format`) | Yes | Yes | `openai` |
+| Anthropic | Yes | Yes (tool schema) | Yes (data URI images) | Yes | `anthropic` |
+| Google Gemini | Yes | Yes (`response_schema`) | Yes (data URI images) | Yes | `gemini` |
+| OpenRouter | Yes | Yes (OpenAI-compatible schema) | Model-dependent | Yes | `openrouter` |
+
+Install one provider:
+
+```bash
+pip install llm-markdown[anthropic]
+pip install llm-markdown[gemini]
+pip install llm-markdown[openrouter]
+```
+
+Or install all providers:
+
+```bash
+pip install llm-markdown[all]
+```
+
+Instantiate providers:
+
+```python
+from llm_markdown.providers import (
+    OpenAIProvider,
+    AnthropicProvider,
+    GeminiProvider,
+    OpenRouterProvider,
+)
+
+openai_provider = OpenAIProvider(api_key="sk-...", model="gpt-4o-mini")
+anthropic_provider = AnthropicProvider(api_key="sk-ant-...", model="claude-3-5-sonnet-latest")
+gemini_provider = GeminiProvider(api_key="AIza...", model="gemini-2.0-flash")
+openrouter_provider = OpenRouterProvider(
+    api_key="sk-or-...",
+    model="openai/gpt-4o-mini",
+    app_name="llm-markdown",
+    app_url="https://example.com",
+)
+```
 
 ## Structured output
 
@@ -160,11 +206,27 @@ class MyProvider(LLMProvider):
         ...  # return parsed dict
 ```
 
-`OpenAIProvider` handles all OpenAI model families (GPT-4o, GPT-5, o1/o3/o4) and auto-detects the correct token parameter.
+Built-in providers:
+
+- `OpenAIProvider`: OpenAI models (GPT-4o, GPT-5, o1/o3/o4) with automatic token parameter detection.
+- `AnthropicProvider`: Claude models with native structured output via tool schema.
+- `GeminiProvider`: Gemini models with native structured output via response schema.
+- `OpenRouterProvider`: OpenAI-compatible models routed through OpenRouter.
 
 ## Testing
 
 ```bash
-pytest                                          # unit tests (no API key)
-OPENAI_API_KEY=sk-... pytest -m integration     # real API tests
+pytest                          # unit tests (no API key)
+cp .env.example .env           # fill provider keys
+set -a; source .env; set +a
+pytest -m integration           # real provider API tests
 ```
+
+Required keys for provider integration tests:
+
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GOOGLE_API_KEY`
+- `OPENROUTER_API_KEY`
+
+Integration tests run against a curated model set per provider and skip individual model cases if a model is not enabled for the key/account.

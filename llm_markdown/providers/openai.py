@@ -45,16 +45,31 @@ class OpenAIProvider(LLMProvider):
     """
 
     def __init__(
-        self, api_key: str, model: str = "gpt-4o-mini", max_tokens: int = 4096
+        self,
+        api_key: str,
+        model: str = "gpt-4o-mini",
+        max_tokens: int = 4096,
+        base_url: str | None = None,
+        default_headers: dict | None = None,
     ):
         self.api_key = api_key
         self.model = model
         self.max_tokens = max_tokens
+        self.base_url = base_url
+        self.default_headers = default_headers or {}
         self._token_param = (
             "max_completion_tokens" if _uses_modern_tokens(model) else "max_tokens"
         )
-        self.client = openai.OpenAI(api_key=self.api_key)
-        self.async_client = openai.AsyncOpenAI(api_key=self.api_key)
+        self.client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            default_headers=self.default_headers or None,
+        )
+        self.async_client = openai.AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            default_headers=self.default_headers or None,
+        )
 
     def _token_kwargs(self) -> dict:
         return {self._token_param: self.max_tokens}

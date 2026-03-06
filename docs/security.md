@@ -10,6 +10,8 @@
 
 - `Image` URLs are fetched over HTTP(S); treat them as untrusted input.
 - Prefer allowlisted hosts and validate upstream content in production systems.
+- Use `LLM_MARKDOWN_IMAGE_URL_ALLOWLIST` to restrict allowed image hosts.
+- Keep `LLM_MARKDOWN_IMAGE_BLOCK_PRIVATE_NETWORKS=true` (default) to block private-network targets.
 
 ## Recommended practices
 

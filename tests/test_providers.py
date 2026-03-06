@@ -138,3 +138,28 @@ def test_extract_chunk_usage_none_usage():
     chunk = MagicMock()
     chunk.usage = None
     assert _extract_chunk_usage(chunk) is None
+
+
+def test_openai_provider_metadata_contract(monkeypatch):
+    provider = OpenAIProvider(api_key="test-key", model="gpt-4o-mini")
+
+    response = MagicMock()
+    response.id = "resp-123"
+    response.usage.prompt_tokens = 2
+    response.usage.completion_tokens = 3
+    response.usage.total_tokens = 5
+    response.choices = [MagicMock()]
+    response.choices[0].message.content = "ok"
+
+    monkeypatch.setattr(
+        provider.client.chat.completions,
+        "create",
+        lambda **kwargs: response,
+    )
+    result = provider.complete([{"role": "user", "content": "hi"}], stream=False)
+    assert result == "ok"
+    metadata = provider.last_response_metadata()
+    assert metadata["request_id"] == "resp-123"
+    assert "latency_ms" in metadata
+    assert "retry_attempts" in metadata
+    assert "token_usage" in metadata

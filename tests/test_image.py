@@ -55,13 +55,56 @@ def test_to_data_uri_raises_on_invalid_input():
 
 def test_to_data_uri_fetches_url():
     with patch("llm_markdown.requests.get") as mock_get:
-        mock_get.return_value.content = b"fake image"
-        mock_get.return_value.headers = {"content-type": "image/png"}
-        mock_get.return_value.raise_for_status = lambda: None
+        with patch("llm_markdown._host_resolves_to_private_network", return_value=False):
+            mock_get.return_value.content = b"fake image"
+            mock_get.return_value.headers = {"content-type": "image/png"}
+            mock_get.return_value.raise_for_status = lambda: None
 
-        result = _to_data_uri("https://example.com/photo.jpg")
-        assert result.startswith("data:image/png;base64,")
-        mock_get.assert_called_once_with("https://example.com/photo.jpg", timeout=30)
+            result = _to_data_uri("https://example.com/photo.jpg")
+            assert result.startswith("data:image/png;base64,")
+            mock_get.assert_called_once_with(
+                "https://example.com/photo.jpg",
+                timeout=30,
+                allow_redirects=False,
+            )
+
+
+def test_to_data_uri_rejects_private_network_hosts():
+    with patch("llm_markdown._host_resolves_to_private_network", return_value=True):
+        with pytest.raises(ValueError, match="private network address"):
+            _to_data_uri("https://example.com/photo.jpg")
+
+
+def test_to_data_uri_respects_allowlist(monkeypatch):
+    monkeypatch.setenv("LLM_MARKDOWN_IMAGE_URL_ALLOWLIST", "allowed.example")
+    with patch("llm_markdown._host_resolves_to_private_network", return_value=False):
+        with patch("llm_markdown.requests.get") as mock_get:
+            mock_get.return_value.content = b"fake image"
+            mock_get.return_value.headers = {"content-type": "image/png"}
+            mock_get.return_value.raise_for_status = lambda: None
+
+            _to_data_uri("https://allowed.example/photo.jpg")
+            mock_get.assert_called_once()
+
+
+def test_to_data_uri_blocks_non_allowlisted_host(monkeypatch):
+    monkeypatch.setenv("LLM_MARKDOWN_IMAGE_URL_ALLOWLIST", "allowed.example")
+    with patch("llm_markdown._host_resolves_to_private_network", return_value=False):
+        with pytest.raises(ValueError, match="not in LLM_MARKDOWN_IMAGE_URL_ALLOWLIST"):
+            _to_data_uri("https://example.com/photo.jpg")
+
+
+def test_to_data_uri_rejects_large_content_length():
+    with patch("llm_markdown.requests.get") as mock_get:
+        with patch("llm_markdown._host_resolves_to_private_network", return_value=False):
+            mock_get.return_value.content = b"fake image"
+            mock_get.return_value.headers = {
+                "content-type": "image/png",
+                "content-length": str(30 * 1024 * 1024),
+            }
+            mock_get.return_value.raise_for_status = lambda: None
+            with pytest.raises(ValueError, match="exceeds"):
+                _to_data_uri("https://example.com/photo.jpg")
 
 
 def test_to_data_uri_reads_local_file(tmp_path):
@@ -73,11 +116,12 @@ def test_to_data_uri_reads_local_file(tmp_path):
 
 def test_to_data_uri_rejects_non_image_content_type():
     with patch("llm_markdown.requests.get") as mock_get:
-        mock_get.return_value.content = b"not image"
-        mock_get.return_value.headers = {"content-type": "application/json"}
-        mock_get.return_value.raise_for_status = lambda: None
-        with pytest.raises(ValueError, match="Unsupported image media type"):
-            _to_data_uri("https://example.com/not-image")
+        with patch("llm_markdown._host_resolves_to_private_network", return_value=False):
+            mock_get.return_value.content = b"not image"
+            mock_get.return_value.headers = {"content-type": "application/json"}
+            mock_get.return_value.raise_for_status = lambda: None
+            with pytest.raises(ValueError, match="Unsupported image media type"):
+                _to_data_uri("https://example.com/not-image")
 
 
 # ---- Image class -----------------------------------------------------------

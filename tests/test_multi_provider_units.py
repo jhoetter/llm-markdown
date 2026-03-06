@@ -7,6 +7,8 @@ from llm_markdown.providers.anthropic import AnthropicProvider
 from llm_markdown.providers.gemini import GeminiProvider
 from llm_markdown.providers.openai import OpenAIProvider
 from llm_markdown.providers.openrouter import OpenRouterProvider
+from llm_markdown.providers.router import RouterProvider
+from tests.conftest import MockProvider
 
 
 def test_openrouter_provider_uses_openrouter_base_url(monkeypatch):
@@ -129,3 +131,9 @@ async def test_gemini_provider_stream_and_structured(monkeypatch):
     chunks = [chunk async for chunk in stream]
     assert "".join(chunks) == "ab"
     assert provider._last_usage is None
+
+
+def test_router_provider_composes_providers():
+    router = RouterProvider(routes=[MockProvider(response="ok")])
+    result = router.complete([{"role": "user", "content": "hi"}])
+    assert result == "ok"

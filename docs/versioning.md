@@ -11,9 +11,18 @@
 - Minor: backward-compatible feature additions.
 - Major: breaking API or behavioral changes.
 
+## API stability policy
+
+- Stable: documented top-level APIs in `README.md` and `docs/`.
+- Experimental: newly introduced surfaces without migration guarantees.
+- Breaking changes require:
+  - migration guidance
+  - explicit release-note callout
+  - tests and docs updated in same PR
+
 ## Release checklist
 
 1. Run `pytest -m "not integration"`.
 2. Run `python -m build`.
-3. Prepare release notes for user-visible changes.
+3. Prepare release notes using `docs/release-notes-template.md`.
 4. Publish via the existing release workflow.

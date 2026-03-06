@@ -140,6 +140,24 @@ class LangfuseWrapper(LLMProvider):
         )
         return result
 
+    # -- image generation ------------------------------------------------
+
+    def generate_image(self, prompt: str, **kwargs) -> dict:
+        result = self.provider.generate_image(prompt, **kwargs)
+        self._log_generation("llm_generate_image", [{"role": "user", "content": prompt}], json.dumps(result), None)
+        self._last_response_metadata = getattr(
+            self.provider, "_last_response_metadata", None
+        )
+        return result
+
+    async def generate_image_async(self, prompt: str, **kwargs) -> dict:
+        result = await self.provider.generate_image_async(prompt, **kwargs)
+        self._log_generation("llm_generate_image_async", [{"role": "user", "content": prompt}], json.dumps(result), None)
+        self._last_response_metadata = getattr(
+            self.provider, "_last_response_metadata", None
+        )
+        return result
+
     def __del__(self):
         try:
             if hasattr(self, "langfuse") and self.langfuse:

@@ -25,3 +25,19 @@ def answer(image: Image, question: str) -> str:
 
 answer(Image("./assets/chart.png"), "What trend is shown?")
 ```
+
+## Image generation
+
+llm-markdown also supports provider image-generation endpoints:
+
+```python
+from llm_markdown import generate_image
+
+result = generate_image(
+    provider=provider,
+    prompt="A clean isometric illustration of a data pipeline",
+    model="openai/gpt-image-1",
+)
+```
+
+The returned payload includes provider/model metadata and one or more generated images (URL or base64, depending on provider response mode).

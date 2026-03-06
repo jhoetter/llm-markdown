@@ -7,15 +7,28 @@ import binascii
 import mimetypes
 import os
 import re
+import socket
+import ipaddress
 import requests
 from urllib.parse import urlparse
 from dataclasses import dataclass
-from typing import get_type_hints, get_origin, get_args, List, Dict, Any, Generic, TypeVar
+from typing import (
+    get_type_hints,
+    get_origin,
+    get_args,
+    List,
+    Dict,
+    Any,
+    Generic,
+    TypeVar,
+)
 from pydantic import BaseModel
 import logging
 
 logger = logging.getLogger(__name__)
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_IMAGE_URL_ALLOWLIST_ENV = "LLM_MARKDOWN_IMAGE_URL_ALLOWLIST"
+_IMAGE_BLOCK_PRIVATE_ENV = "LLM_MARKDOWN_IMAGE_BLOCK_PRIVATE_NETWORKS"
 T = TypeVar("T")
 
 
@@ -56,11 +69,65 @@ def _validate_image_content(content_type: str, payload: bytes):
         )
 
 
+def _is_host_allowlisted(hostname: str) -> bool:
+    allowlist = os.environ.get(_IMAGE_URL_ALLOWLIST_ENV, "").strip()
+    if not allowlist:
+        return True
+    allowed = [item.strip().lower() for item in allowlist.split(",") if item.strip()]
+    host = hostname.lower()
+    return any(host == domain or host.endswith(f".{domain}") for domain in allowed)
+
+
+def _host_resolves_to_private_network(hostname: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        # If host cannot be resolved, requests will fail later.
+        return False
+    for info in infos:
+        raw_ip = info[4][0]
+        try:
+            ip = ipaddress.ip_address(raw_ip)
+        except ValueError:
+            continue
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+        ):
+            return True
+    return False
+
+
+def _validate_remote_image_url(source: str):
+    parsed = urlparse(source)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Image URL must include a hostname")
+    if not _is_host_allowlisted(hostname):
+        raise ValueError(
+            f"Image URL host '{hostname}' is not in {_IMAGE_URL_ALLOWLIST_ENV}"
+        )
+    block_private = os.environ.get(_IMAGE_BLOCK_PRIVATE_ENV, "true").lower() != "false"
+    if block_private and _host_resolves_to_private_network(hostname):
+        raise ValueError(
+            f"Image URL host '{hostname}' resolves to a private network address"
+        )
+
+
 def _to_data_uri(source: str) -> str:
     """Convert a URL, file path, or raw base64 string into a data URI."""
     if _is_url(source):
-        response = requests.get(source, timeout=30)
+        _validate_remote_image_url(source)
+        response = requests.get(source, timeout=30, allow_redirects=False)
         response.raise_for_status()
+        length = response.headers.get("content-length")
+        if length and int(length) > _MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"Image payload exceeds {_MAX_IMAGE_BYTES // (1024 * 1024)}MB limit"
+            )
         content_type = response.headers.get("content-type", "image/jpeg")
         content_type = content_type.split(";", 1)[0]
         _validate_image_content(content_type, response.content)
@@ -117,11 +184,126 @@ class PromptResult(Generic[T]):
     metadata: dict[str, Any] | None
 
 
+class Session:
+    """Maintains chat history for multi-turn prompt calls."""
+
+    def __init__(
+        self,
+        provider,
+        *,
+        system_prompt: str = "You are a helpful assistant.",
+        max_messages: int | None = None,
+        max_tokens: int | None = None,
+        generation_options: dict | None = None,
+        langfuse_metadata: dict | None = None,
+        return_metadata: bool = False,
+    ):
+        self.provider = provider
+        self.system_prompt = system_prompt
+        self.max_messages = max_messages
+        self.max_tokens = max_tokens
+        self.generation_options = generation_options or {}
+        self.langfuse_metadata = langfuse_metadata or {}
+        self.return_metadata = return_metadata
+        self.history: list[dict] = []
+        if system_prompt:
+            self.history.append({"role": "system", "content": system_prompt})
+
+    def reset(self):
+        self.history = []
+        if self.system_prompt:
+            self.history.append({"role": "system", "content": self.system_prompt})
+
+    def prompt(
+        self,
+        *,
+        stream: bool = False,
+        stream_mode: str = "text",
+        generation_options: dict | None = None,
+        langfuse_metadata: dict | None = None,
+        return_metadata: bool | None = None,
+    ):
+        merged_options = dict(self.generation_options)
+        merged_options.update(generation_options or {})
+        metadata = dict(self.langfuse_metadata)
+        metadata.update(langfuse_metadata or {})
+        return _PromptDecorator(
+            provider=self.provider,
+            stream=stream,
+            stream_mode=stream_mode,
+            langfuse_metadata=metadata,
+            generation_options=merged_options,
+            return_metadata=self.return_metadata if return_metadata is None else return_metadata,
+            session=self,
+        )
+
+    def _prepare_messages(self, user_content):
+        messages = list(self.history)
+        messages.append({"role": "user", "content": user_content})
+        return messages
+
+    @staticmethod
+    def _content_to_text(content) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+                elif isinstance(item, dict):
+                    parts.append(str(item))
+                else:
+                    parts.append(str(item))
+            return "\n".join(parts)
+        return str(content)
+
+    def _trim_history(self):
+        if self.max_messages is not None:
+            system = [m for m in self.history if m.get("role") == "system"]
+            non_system = [m for m in self.history if m.get("role") != "system"]
+            if len(non_system) > self.max_messages:
+                non_system = non_system[-self.max_messages :]
+            self.history = system[:1] + non_system if system else non_system
+
+        if self.max_tokens is not None and self.max_tokens > 0:
+            def _size(msg):
+                return len(self._content_to_text(msg.get("content", "")))
+
+            while len(self.history) > 1:
+                total = sum(_size(m) for m in self.history)
+                if total <= self.max_tokens:
+                    break
+                # Preserve leading system prompt when available.
+                remove_idx = 1 if self.history[0].get("role") == "system" else 0
+                self.history.pop(remove_idx)
+
+    def _append_turn(self, user_content, assistant_output):
+        self.history.append({"role": "user", "content": user_content})
+        self.history.append(
+            {
+                "role": "assistant",
+                "content": _response_to_history_text(assistant_output),
+            }
+        )
+        self._trim_history()
+
+
 def get_last_response_metadata(provider) -> dict[str, Any] | None:
     """Return metadata from the most recent provider call."""
     if hasattr(provider, "last_response_metadata"):
         return provider.last_response_metadata()
     return getattr(provider, "_last_response_metadata", None)
+
+
+def _response_to_history_text(value) -> str:
+    if isinstance(value, PromptResult):
+        return _response_to_history_text(value.output)
+    if isinstance(value, BaseModel):
+        return value.model_dump_json()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return str(value)
 
 
 # ---------------------------------------------------------------------------
@@ -326,15 +508,21 @@ class _PromptDecorator:
         self,
         provider,
         stream: bool = False,
+        stream_mode: str = "text",
         langfuse_metadata: dict | None = None,
         generation_options: dict | None = None,
         return_metadata: bool = False,
+        session: Session | None = None,
     ):
         self.provider = provider
         self.stream = stream
+        self.stream_mode = stream_mode
         self.langfuse_metadata = langfuse_metadata or {}
         self.generation_options = generation_options or {}
         self.return_metadata = return_metadata
+        self.session = session
+        if self.stream_mode not in {"text", "json_events"}:
+            raise ValueError("stream_mode must be 'text' or 'json_events'")
 
     # -- prompt & message building ---------------------------------------
 
@@ -395,6 +583,84 @@ class _PromptDecorator:
             return result
         metadata = get_last_response_metadata(self.provider)
         return PromptResult(output=result, metadata=metadata)
+
+    @staticmethod
+    def _try_parse_partial_json(text: str):
+        candidate = text.strip()
+        if not candidate:
+            return None
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+
+    def _wrap_stream_with_session(self, stream, user_msg):
+        def _gen():
+            chunks = []
+            for chunk in stream:
+                chunks.append(chunk)
+                yield chunk
+            if self.session:
+                self.session._append_turn(user_msg, "".join(chunks))
+
+        return _gen()
+
+    async def _wrap_stream_with_session_async(self, stream, user_msg):
+        async def _gen():
+            chunks = []
+            async for chunk in stream:
+                chunks.append(chunk)
+                yield chunk
+            if self.session:
+                self.session._append_turn(user_msg, "".join(chunks))
+
+        return _gen()
+
+    def _stream_json_events(self, stream, return_type, user_msg):
+        def _gen():
+            text = ""
+            last_partial = object()
+            try:
+                for chunk in stream:
+                    text += chunk
+                    yield {"type": "delta_text", "delta": chunk}
+                    partial = self._try_parse_partial_json(text)
+                    if partial is not None and partial != last_partial:
+                        last_partial = partial
+                        yield {"type": "partial_json", "data": partial}
+
+                parsed = _parse_response(text, return_type)
+                if self.session:
+                    self.session._append_turn(user_msg, parsed)
+                done_output = self._finalize_output(parsed)
+                yield {"type": "done", "output": done_output}
+            except Exception as exc:
+                yield {"type": "error", "error": str(exc)}
+
+        return _gen()
+
+    async def _stream_json_events_async(self, stream, return_type, user_msg):
+        async def _gen():
+            text = ""
+            last_partial = object()
+            try:
+                async for chunk in stream:
+                    text += chunk
+                    yield {"type": "delta_text", "delta": chunk}
+                    partial = self._try_parse_partial_json(text)
+                    if partial is not None and partial != last_partial:
+                        last_partial = partial
+                        yield {"type": "partial_json", "data": partial}
+
+                parsed = _parse_response(text, return_type)
+                if self.session:
+                    self.session._append_turn(user_msg, parsed)
+                done_output = self._finalize_output(parsed)
+                yield {"type": "done", "output": done_output}
+            except Exception as exc:
+                yield {"type": "error", "error": str(exc)}
+
+        return _gen()
 
     # -- execution paths -------------------------------------------------
 
@@ -489,20 +755,32 @@ class _PromptDecorator:
                 images = self._collect_images(bound.arguments, hints)
                 user_msg = self._build_user_message(prompt_text, images)
 
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": user_msg},
-                ]
+                if self.session:
+                    messages = self.session._prepare_messages(user_msg)
+                else:
+                    messages = [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": user_msg},
+                    ]
 
                 if hasattr(self.provider, "set_request_metadata"):
                     self.provider.set_request_metadata(self.langfuse_metadata)
 
                 if self.stream:
-                    return await self.provider.complete_async(
+                    raw_stream = await self.provider.complete_async(
                         messages,
                         stream=True,
                         **generation_options,
                     )
+                    if self.stream_mode == "json_events":
+                        return await self._stream_json_events_async(
+                            raw_stream, return_type, user_msg
+                        )
+                    if self.session:
+                        return await self._wrap_stream_with_session_async(
+                            raw_stream, user_msg
+                        )
+                    return raw_stream
 
                 if _needs_structured_output(return_type):
                     try:
@@ -511,6 +789,8 @@ class _PromptDecorator:
                             return_type,
                             generation_options,
                         )
+                        if self.session:
+                            self.session._append_turn(user_msg, structured)
                         return self._finalize_output(structured)
                     except NotImplementedError:
                         logger.debug(
@@ -522,6 +802,8 @@ class _PromptDecorator:
                             return_type,
                             generation_options,
                         )
+                        if self.session:
+                            self.session._append_turn(user_msg, fallback)
                         return self._finalize_output(fallback)
 
                 raw = await self.provider.complete_async(
@@ -531,7 +813,10 @@ class _PromptDecorator:
                 )
                 raw = raw.strip()
                 logger.debug(f"Raw LLM response:\n{raw}")
-                return self._finalize_output(_parse_response(raw, return_type))
+                parsed = _parse_response(raw, return_type)
+                if self.session:
+                    self.session._append_turn(user_msg, parsed)
+                return self._finalize_output(parsed)
 
             async_wrapper.__name__ = func.__name__
             async_wrapper.__doc__ = func.__doc__
@@ -549,20 +834,28 @@ class _PromptDecorator:
                 images = self._collect_images(bound.arguments, hints)
                 user_msg = self._build_user_message(prompt_text, images)
 
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": user_msg},
-                ]
+                if self.session:
+                    messages = self.session._prepare_messages(user_msg)
+                else:
+                    messages = [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": user_msg},
+                    ]
 
                 if hasattr(self.provider, "set_request_metadata"):
                     self.provider.set_request_metadata(self.langfuse_metadata)
 
                 if self.stream:
-                    return self.provider.complete(
+                    raw_stream = self.provider.complete(
                         messages,
                         stream=True,
                         **generation_options,
                     )
+                    if self.stream_mode == "json_events":
+                        return self._stream_json_events(raw_stream, return_type, user_msg)
+                    if self.session:
+                        return self._wrap_stream_with_session(raw_stream, user_msg)
+                    return raw_stream
 
                 if _needs_structured_output(return_type):
                     try:
@@ -571,6 +864,8 @@ class _PromptDecorator:
                             return_type,
                             generation_options,
                         )
+                        if self.session:
+                            self.session._append_turn(user_msg, structured)
                         return self._finalize_output(structured)
                     except NotImplementedError:
                         logger.debug(
@@ -582,6 +877,8 @@ class _PromptDecorator:
                             return_type,
                             generation_options,
                         )
+                        if self.session:
+                            self.session._append_turn(user_msg, fallback)
                         return self._finalize_output(fallback)
 
                 raw = self.provider.complete(
@@ -591,7 +888,10 @@ class _PromptDecorator:
                 )
                 raw = raw.strip()
                 logger.debug(f"Raw LLM response:\n{raw}")
-                return self._finalize_output(_parse_response(raw, return_type))
+                parsed = _parse_response(raw, return_type)
+                if self.session:
+                    self.session._append_turn(user_msg, parsed)
+                return self._finalize_output(parsed)
 
             wrapper.__name__ = func.__name__
             wrapper.__doc__ = func.__doc__
@@ -602,6 +902,7 @@ def prompt(
     provider,
     *,
     stream: bool = False,
+    stream_mode: str = "text",
     langfuse_metadata: dict | None = None,
     generation_options: dict | None = None,
     return_metadata: bool = False,
@@ -620,6 +921,8 @@ def prompt(
     Args:
         provider: An LLMProvider instance.
         stream: If True, return a streaming iterator instead of a complete response.
+        stream_mode: Streaming behavior. ``text`` yields text chunks;
+            ``json_events`` yields event dicts.
         langfuse_metadata: Optional metadata dict passed to LangfuseWrapper.
         generation_options: Default provider options passed to each call
             (for example ``temperature``, ``top_p``, ``max_tokens``).
@@ -637,7 +940,44 @@ def prompt(
     return _PromptDecorator(
         provider=provider,
         stream=stream,
+        stream_mode=stream_mode,
         langfuse_metadata=langfuse_metadata,
         generation_options=generation_options,
         return_metadata=return_metadata,
     )
+
+
+def generate_image(
+    provider,
+    prompt: str,
+    *,
+    model: str | None = None,
+    generation_options: dict | None = None,
+    return_metadata: bool = False,
+):
+    """Generate an image using a provider's image-generation endpoint."""
+    options = dict(generation_options or {})
+    if model is not None:
+        options["model"] = model
+    result = provider.generate_image(prompt, **options)
+    if not return_metadata:
+        return result
+    return PromptResult(output=result, metadata=get_last_response_metadata(provider))
+
+
+async def generate_image_async(
+    provider,
+    prompt: str,
+    *,
+    model: str | None = None,
+    generation_options: dict | None = None,
+    return_metadata: bool = False,
+):
+    """Async image-generation helper."""
+    options = dict(generation_options or {})
+    if model is not None:
+        options["model"] = model
+    result = await provider.generate_image_async(prompt, **options)
+    if not return_metadata:
+        return result
+    return PromptResult(output=result, metadata=get_last_response_metadata(provider))

@@ -44,6 +44,7 @@ class LLMProvider(ABC):
         )
         self._last_usage: dict[str, Any] | None = None
         self._last_response_metadata: dict[str, Any] | None = None
+        self._last_retry_attempts: int = 0
 
     @staticmethod
     def _error_message(exc: Exception) -> str:
@@ -94,10 +95,12 @@ class LLMProvider(ABC):
         attempts = self.retry_config.max_retries + 1
         for attempt in range(attempts):
             try:
+                self._last_retry_attempts = attempt
                 return func()
             except Exception as exc:
                 retryable = self._is_retryable_error(exc)
                 if attempt >= attempts - 1 or not retryable:
+                    self._last_retry_attempts = attempt
                     raise self._normalize_error(exc, retryable=retryable) from exc
                 delay = self.retry_config.retry_backoff_seconds * (2**attempt)
                 time.sleep(delay)
@@ -106,10 +109,12 @@ class LLMProvider(ABC):
         attempts = self.retry_config.max_retries + 1
         for attempt in range(attempts):
             try:
+                self._last_retry_attempts = attempt
                 return await func()
             except Exception as exc:
                 retryable = self._is_retryable_error(exc)
                 if attempt >= attempts - 1 or not retryable:
+                    self._last_retry_attempts = attempt
                     raise self._normalize_error(exc, retryable=retryable) from exc
                 delay = self.retry_config.retry_backoff_seconds * (2**attempt)
                 await asyncio.sleep(delay)
@@ -173,4 +178,21 @@ class LLMProvider(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support structured output. "
             "Override complete_structured_async() to enable it."
+        )
+
+    def generate_image(self, prompt: str, **kwargs) -> dict:
+        """Generate an image from text prompt.
+
+        Returns a normalized dict payload containing image data/url and metadata.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support image generation. "
+            "Override generate_image() to enable it."
+        )
+
+    async def generate_image_async(self, prompt: str, **kwargs) -> dict:
+        """Async version of generate_image."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support image generation. "
+            "Override generate_image_async() to enable it."
         )

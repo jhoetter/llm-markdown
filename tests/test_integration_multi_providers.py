@@ -35,6 +35,7 @@ GEMINI_TEST_MODELS = [
 OPENROUTER_TEST_MODELS = [
     "openai/gpt-4o-mini",
     "anthropic/claude-3.5-haiku",
+    "inception/mercury-2",
 ]
 
 

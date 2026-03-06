@@ -248,6 +248,13 @@ def test_default_arguments_work(mock_provider):
     assert content == "Say Hi to Alice"
 
 
+def test_invalid_stream_mode_raises(mock_provider):
+    with pytest.raises(ValueError, match="stream_mode must be"):
+        @prompt(provider=mock_provider, stream=True, stream_mode="invalid")
+        def bad_stream(text: str) -> str:
+            """Say {text}"""
+
+
 def test_generation_options_passed_to_provider(mock_provider):
     @prompt(provider=mock_provider, generation_options={"temperature": 0.4, "top_p": 0.8})
     def summarize(text: str) -> str:

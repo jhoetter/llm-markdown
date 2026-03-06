@@ -4,7 +4,23 @@
 
 Use `@prompt(provider, stream=True)` to return an iterator (sync) or async iterator (async function).
 
-`stream=True` is always plain text streaming, even when the return type is structured.
+Default mode (`stream_mode="text"`) yields text chunks.  
+Use `stream_mode="json_events"` for structured event streams.
+
+Example event stream:
+
+```python
+@prompt(provider, stream=True, stream_mode="json_events")
+def classify(text: str) -> dict:
+    """Return JSON classification for: {text}"""
+```
+
+Event types:
+
+- `delta_text`
+- `partial_json`
+- `done`
+- `error`
 
 ## Async
 

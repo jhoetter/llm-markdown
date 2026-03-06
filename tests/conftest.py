@@ -2,6 +2,14 @@ import os
 import pytest
 from llm_markdown.providers.base import LLMProvider
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    # Keep tests working when python-dotenv is not installed.
+    pass
+
 
 class MockProvider(LLMProvider):
     """Test provider that records calls and returns canned responses."""
@@ -23,6 +31,26 @@ class MockProvider(LLMProvider):
         if kwargs.get("stream"):
             return iter(list(self._response))
         return self._response
+
+    def generate_image(self, prompt, **kwargs):
+        self.calls.append(("generate_image", prompt, kwargs))
+        self._last_response_metadata = {
+            "provider": "MockProvider",
+            "model": kwargs.get("model", "mock-image-model"),
+            "response_id": "mock-image-id",
+            "usage": None,
+            "image_generation": True,
+        }
+        return {
+            "provider": "MockProvider",
+            "model": kwargs.get("model", "mock-image-model"),
+            "response_id": "mock-image-id",
+            "images": [{"url": "https://example.com/mock.png", "b64_json": None}],
+        }
+
+    async def generate_image_async(self, prompt, **kwargs):
+        self.calls.append(("generate_image_async", prompt, kwargs))
+        return self.generate_image(prompt, **kwargs)
 
     async def complete_async(self, messages, **kwargs):
         self.calls.append(("complete_async", messages, kwargs))

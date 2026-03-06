@@ -1,4 +1,5 @@
 import json
+import time
 import warnings
 import openai
 from .base import LLMProvider
@@ -29,6 +30,24 @@ def _extract_chunk_usage(chunk) -> dict | None:
             "total_tokens": getattr(chunk.usage, "total_tokens", None),
         }
     return None
+
+
+def _normalize_image_response(provider_name: str, model: str, response) -> dict:
+    images = []
+    for item in getattr(response, "data", []) or []:
+        images.append(
+            {
+                "url": getattr(item, "url", None),
+                "b64_json": getattr(item, "b64_json", None),
+                "revised_prompt": getattr(item, "revised_prompt", None),
+            }
+        )
+    return {
+        "provider": provider_name,
+        "model": model,
+        "response_id": getattr(response, "id", None),
+        "images": images,
+    }
 
 
 class OpenAIProvider(LLMProvider):
@@ -89,12 +108,19 @@ class OpenAIProvider(LLMProvider):
             token_kwargs["max_tokens"] = options.pop("max_completion_tokens")
         return token_kwargs
 
-    def _capture_metadata(self, response):
+    def _capture_metadata(self, response, *, started_at: float | None = None):
         self._last_response_metadata = {
             "provider": type(self).__name__,
             "model": self.model,
             "response_id": getattr(response, "id", None),
-            "usage": self._last_usage,
+            "request_id": getattr(response, "id", None),
+            "latency_ms": (
+                int((time.perf_counter() - started_at) * 1000)
+                if started_at is not None
+                else None
+            ),
+            "retry_attempts": self._last_retry_attempts,
+            "token_usage": self._last_usage,
         }
 
     def _request_options(self, kwargs: dict) -> dict:
@@ -110,6 +136,7 @@ class OpenAIProvider(LLMProvider):
         self, messages: list[dict], **kwargs
     ) -> Union[str, Iterator[str]]:
         stream = kwargs.get("stream", False)
+        started = time.perf_counter()
         request_kwargs = self._request_options(kwargs)
         response = self._call_with_retries(
             lambda: self.client.chat.completions.create(
@@ -132,18 +159,22 @@ class OpenAIProvider(LLMProvider):
                     "provider": type(self).__name__,
                     "model": self.model,
                     "response_id": getattr(last_chunk, "id", None),
-                    "usage": self._last_usage,
+                    "request_id": getattr(last_chunk, "id", None),
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                    "retry_attempts": self._last_retry_attempts,
+                    "token_usage": self._last_usage,
                 }
             return _gen()
 
         self._last_usage = _extract_usage(response)
-        self._capture_metadata(response)
+        self._capture_metadata(response, started_at=started)
         return response.choices[0].message.content
 
     async def complete_async(
         self, messages: list[dict], **kwargs
     ) -> Union[str, AsyncIterator[str]]:
         stream = kwargs.get("stream", False)
+        started = time.perf_counter()
         request_kwargs = self._request_options(kwargs)
         response = await self._acall_with_retries(
             lambda: self.async_client.chat.completions.create(
@@ -166,17 +197,21 @@ class OpenAIProvider(LLMProvider):
                     "provider": type(self).__name__,
                     "model": self.model,
                     "response_id": getattr(last_chunk, "id", None),
-                    "usage": self._last_usage,
+                    "request_id": getattr(last_chunk, "id", None),
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                    "retry_attempts": self._last_retry_attempts,
+                    "token_usage": self._last_usage,
                 }
             return _gen()
 
         self._last_usage = _extract_usage(response)
-        self._capture_metadata(response)
+        self._capture_metadata(response, started_at=started)
         return response.choices[0].message.content
 
     # -- structured output -----------------------------------------------
 
     def complete_structured(self, messages: list[dict], schema: dict, **kwargs) -> dict:
+        started = time.perf_counter()
         request_kwargs = self._request_options(kwargs)
         response = self._call_with_retries(
             lambda: self.client.chat.completions.create(
@@ -194,12 +229,13 @@ class OpenAIProvider(LLMProvider):
             )
         )
         self._last_usage = _extract_usage(response)
-        self._capture_metadata(response)
+        self._capture_metadata(response, started_at=started)
         return json.loads(response.choices[0].message.content)
 
     async def complete_structured_async(
         self, messages: list[dict], schema: dict, **kwargs
     ) -> dict:
+        started = time.perf_counter()
         request_kwargs = self._request_options(kwargs)
         response = await self._acall_with_retries(
             lambda: self.async_client.chat.completions.create(
@@ -217,8 +253,72 @@ class OpenAIProvider(LLMProvider):
             )
         )
         self._last_usage = _extract_usage(response)
-        self._capture_metadata(response)
+        self._capture_metadata(response, started_at=started)
         return json.loads(response.choices[0].message.content)
+
+    # -- image generation ------------------------------------------------
+
+    def generate_image(self, prompt: str, **kwargs) -> dict:
+        started = time.perf_counter()
+        image_model = kwargs.pop("model", self.model)
+        request_kwargs = dict(kwargs)
+        request_kwargs.setdefault("size", "1024x1024")
+        request_kwargs.setdefault("quality", "standard")
+        request_kwargs.setdefault("n", 1)
+        request_kwargs["timeout"] = self.retry_config.timeout_seconds
+
+        response = self._call_with_retries(
+            lambda: self.client.images.generate(
+                model=image_model,
+                prompt=prompt,
+                **request_kwargs,
+            )
+        )
+        normalized = _normalize_image_response(type(self).__name__, image_model, response)
+        self._last_usage = None
+        self._last_response_metadata = {
+            "provider": type(self).__name__,
+            "model": image_model,
+            "response_id": normalized.get("response_id"),
+            "request_id": normalized.get("response_id"),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "retry_attempts": self._last_retry_attempts,
+            "token_usage": None,
+            "image_usage": {"count": len(normalized.get("images", []))},
+            "image_generation": True,
+        }
+        return normalized
+
+    async def generate_image_async(self, prompt: str, **kwargs) -> dict:
+        started = time.perf_counter()
+        image_model = kwargs.pop("model", self.model)
+        request_kwargs = dict(kwargs)
+        request_kwargs.setdefault("size", "1024x1024")
+        request_kwargs.setdefault("quality", "standard")
+        request_kwargs.setdefault("n", 1)
+        request_kwargs["timeout"] = self.retry_config.timeout_seconds
+
+        response = await self._acall_with_retries(
+            lambda: self.async_client.images.generate(
+                model=image_model,
+                prompt=prompt,
+                **request_kwargs,
+            )
+        )
+        normalized = _normalize_image_response(type(self).__name__, image_model, response)
+        self._last_usage = None
+        self._last_response_metadata = {
+            "provider": type(self).__name__,
+            "model": image_model,
+            "response_id": normalized.get("response_id"),
+            "request_id": normalized.get("response_id"),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "retry_attempts": self._last_retry_attempts,
+            "token_usage": None,
+            "image_usage": {"count": len(normalized.get("images", []))},
+            "image_generation": True,
+        }
+        return normalized
 
 
 class OpenAILegacyProvider(OpenAIProvider):

@@ -431,6 +431,9 @@ def test_anthropic_off_drops_thinking_kw():
 
 def test_fallback_phase_b_bridge_and_plan_wrapping():
     """Phase B injects a bridge into the system message and wraps the plan as internal notes."""
+    tools = [
+        {"type": "function", "function": {"name": "greet", "parameters": {"type": "object", "properties": {}}}},
+    ]
     phase_a = iter(
         [
             AgentContentDelta(text="internal plan"),
@@ -446,6 +449,7 @@ def test_fallback_phase_b_bridge_and_plan_wrapping():
             "openai",
             [{"role": "system", "content": "App policy."}, {"role": "user", "content": "Hello"}],
             model="gpt-4o-mini",
+            tools=tools,
         )
     )
     assert provider.stream_chat_completion_events.call_count == 2
@@ -469,3 +473,56 @@ def test_fallback_phase_a_asks_for_analysis_not_plan():
     assert "language" in lower
     assert "tools" in lower or "tool" in lower
     assert "never shown" in lower or "not shown" in lower
+
+
+def test_fallback_skips_planning_when_no_tools():
+    """No tools → single direct call, no Phase A planning overhead."""
+    direct = iter(
+        [
+            AgentContentDelta(text="Hello!"),
+            AgentMessageFinish(finish_reason="stop", usage=None),
+        ]
+    )
+    provider = MagicMock()
+    provider.stream_chat_completion_events.return_value = direct
+    events = list(
+        stream_agent_turn_fallback(
+            provider,
+            "openai",
+            [{"role": "user", "content": "hi"}],
+            model="gpt-4o-mini",
+            tools=None,
+        )
+    )
+    assert provider.stream_chat_completion_events.call_count == 1
+    assert any(isinstance(e, AgentContentDelta) and e.text == "Hello!" for e in events)
+    assert not any(isinstance(e, AgentReasoningDelta) for e in events)
+
+
+def test_fallback_skips_planning_when_tool_results_present():
+    """Post-tool round (tool results in history) → single direct call, no Phase A."""
+    direct = iter(
+        [
+            AgentContentDelta(text="You have 10 expenses."),
+            AgentMessageFinish(finish_reason="stop", usage=None),
+        ]
+    )
+    provider = MagicMock()
+    provider.stream_chat_completion_events.return_value = direct
+    msgs = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "how many expenses?"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "get_stats", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"total": 10}'},
+    ]
+    tools = [{"type": "function", "function": {"name": "get_stats", "parameters": {}}}]
+    events = list(
+        stream_agent_turn_fallback(
+            provider, "openai", msgs, model="gpt-4o-mini", tools=tools,
+        )
+    )
+    assert provider.stream_chat_completion_events.call_count == 1
+    assert any(isinstance(e, AgentContentDelta) for e in events)
+    assert not any(isinstance(e, AgentReasoningDelta) for e in events)

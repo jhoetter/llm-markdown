@@ -111,6 +111,31 @@ def _phase_b_events(
     yield from raw
 
 
+def _has_tool_results(messages: list[dict[str, Any]]) -> bool:
+    """True when the conversation already contains tool-result messages (post-tool round)."""
+    return any(m.get("role") == "tool" for m in messages)
+
+
+def _needs_planning(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> bool:
+    """Decide whether Phase A (metacognitive planning) adds value for this round.
+
+    Skip when:
+    - No tools are provided (nothing to plan).
+    - Tool results already exist in the message history — the model already
+      called tools and just needs to answer from results.  Running a second
+      two-phase turn here doubles latency and produces duplicate content
+      (the "plan" IS the answer, then the answer streams again).
+    """
+    if not tools:
+        return False
+    if _has_tool_results(messages):
+        return False
+    return True
+
+
 def stream_agent_turn_fallback(
     provider: Any,
     backend: str,
@@ -126,10 +151,28 @@ def stream_agent_turn_fallback(
     """Phase A: planning stream (no tools) → ``AgentReasoningDelta``; Phase B: tools + pass-through stream.
 
     ``backend`` is ``openai``, ``openrouter`` (OpenAI-compatible), or ``anthropic``.
+
+    Phase A is **skipped** when ``tools`` is empty/``None`` or when the message
+    history already contains tool results (post-tool summary rounds).  In those
+    cases the turn falls through to a single direct completion — same latency
+    as native mode.
     """
     if backend not in ("openai", "openrouter", "anthropic"):
         msg = f"FALLBACK not implemented for backend={backend!r}"
         raise NotImplementedError(msg)
+
+    if not _needs_planning(messages, tools):
+        yield from _phase_b_events(
+            provider,
+            backend,
+            messages,
+            model=model,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens,
+            kwargs=kwargs,
+        )
+        return
 
     plan_cap = planning_max_tokens if planning_max_tokens is not None else min(512, max_tokens or 1024)
     plan_msgs = _inject_planning_system(messages)

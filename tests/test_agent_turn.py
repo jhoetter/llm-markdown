@@ -400,7 +400,7 @@ def test_fallback_phase_b_bridge_and_wrapped_plan():
     assert provider.stream_chat_completion_events.call_count == 2
     msgs_b = provider.stream_chat_completion_events.call_args_list[1][0][0]
     sys0 = next(m for m in msgs_b if m.get("role") == "system")
-    assert "internal notes" in sys0["content"].lower()
+    assert "hidden internal planning notes" in sys0["content"].lower()
     assert "language" in sys0["content"].lower()
     assert "NEVER draft" in sys0["content"]
     plan_msg = msgs_b[-1]
@@ -408,6 +408,35 @@ def test_fallback_phase_b_bridge_and_wrapped_plan():
     assert plan_msg["content"].startswith("[Internal notes")
     assert "internal plan text" in plan_msg["content"]
     assert plan_msg["content"].endswith("[End internal notes]")
+
+
+def test_fallback_phase_b_wrapped_plan_is_user_for_anthropic():
+    """Anthropic: planning block is a synthetic user message (no assistant prefill)."""
+    tools = [
+        {"type": "function", "function": {"name": "greet", "parameters": {"type": "object", "properties": {}}}},
+    ]
+    phase_a = iter([
+        AgentContentDelta(text="internal plan text"),
+        AgentMessageFinish(finish_reason="stop", usage=None),
+    ])
+    phase_b = iter([AgentMessageFinish(finish_reason="stop", usage=None)])
+    provider = MagicMock()
+    provider.stream_messages_events.side_effect = [phase_a, phase_b]
+    list(
+        stream_agent_turn_fallback(
+            provider,
+            "anthropic",
+            [{"role": "system", "content": "App policy."}, {"role": "user", "content": "Hello"}],
+            model="claude-3-5-haiku-latest",
+            tools=tools,
+        )
+    )
+    assert provider.stream_messages_events.call_count == 2
+    msgs_b = provider.stream_messages_events.call_args_list[1][0][0]
+    plan_msg = msgs_b[-1]
+    assert plan_msg["role"] == "user"
+    assert plan_msg["content"].startswith("[Internal notes")
+    assert "internal plan text" in plan_msg["content"]
 
 
 # ---------------------------------------------------------------------------

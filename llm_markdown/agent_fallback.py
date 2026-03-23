@@ -4,9 +4,11 @@
 two provider calls. Phase A has no tools, so the model must emit text; that
 emits :class:`~llm_markdown.agent_stream.AgentReasoningDelta` only (no think-tag
 split; instruction elicits short analytical notes, not a user-facing reply).
-The raw completion is injected into Phase B as hidden notes, then Phase B runs
-with tools and parsed through :class:`ThinkTagParser` (think tags in content
-split into reasoning vs reply; tool deltas unchanged).
+The planning text is injected into Phase B as hidden notes (OpenAI-style
+``assistant`` prefill; **Anthropic** uses a synthetic final ``user`` message —
+Claude rejects assistant prefill on some models), then Phase B runs with tools
+and parsed through :class:`ThinkTagParser` (think tags in content split into
+reasoning vs reply; tool deltas unchanged).
 
 **Answer rounds** (no tools, or tool results already in history): a single
 completion with a thinking-tag instruction; the parser splits streamed text so
@@ -55,10 +57,10 @@ _THINK_TAG_INSTRUCTION = (
 )
 
 _FALLBACK_PHASE_B_BRIDGE = (
-    "The next assistant-role message is **hidden internal notes** from a reasoning step — "
-    "the user never saw it and it is not part of the conversation.  Ignore its tone and phrasing.  "
-    "Respond to the user's last message directly: call tools if needed, then write one clear reply.  "
-    "Match the language of the **user's message** (not the notes)."
+    "The conversation includes **hidden internal planning notes** (a synthetic message the end user "
+    "never saw — assistant-role on OpenAI-compatible APIs, or a labeled user-role block on Anthropic).  "
+    "Ignore that block's tone and phrasing.  Respond to the user's actual last message: call tools "
+    "if needed, then write one clear reply.  Match the language of the **user's message** (not the notes)."
 )
 
 _PLAN_WRAPPER_PREFIX = "[Internal notes — not shown to user]\n"
@@ -322,7 +324,12 @@ def stream_agent_turn_fallback(
     msgs_b = _inject_phase_b_bridge(deepcopy(messages))
     msgs_b = _inject_system_suffix(msgs_b, _THINK_TAG_INSTRUCTION)
     wrapped = _PLAN_WRAPPER_PREFIX + plan_text + _PLAN_WRAPPER_SUFFIX
-    msgs_b.append({"role": "assistant", "content": wrapped})
+    # Anthropic Messages API: trailing plain assistant text is "prefill"; several Claude models reject it
+    # (conversation must end with a user turn). OpenAI chat accepts assistant prefill here.
+    if backend == "anthropic":
+        msgs_b.append({"role": "user", "content": wrapped})
+    else:
+        msgs_b.append({"role": "assistant", "content": wrapped})
 
     yield from _yield_think_tag_split_stream(
         _stream_completion(

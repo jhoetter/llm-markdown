@@ -13,7 +13,17 @@ from llm_markdown.agent_stream import (
     AgentToolCallDelta,
     openai_chat_tools_to_anthropic,
 )
-from llm_markdown.providers.openai import OpenAIProvider, _delta_reasoning_text
+from llm_markdown.providers.openai import OpenAIProvider, _delta_content_text, _delta_reasoning_text
+
+
+def test_delta_content_text_list_parts():
+    d = SimpleNamespace(
+        content=[
+            {"type": "text", "text": "hello"},
+            {"type": "text", "text": " world"},
+        ],
+    )
+    assert _delta_content_text(d) == "hello world"
 
 
 def test_delta_reasoning_text():

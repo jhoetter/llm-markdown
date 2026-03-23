@@ -49,6 +49,10 @@ Provider extras: `openai`, `anthropic`, `gemini`, `openrouter`.
 
 Other extras: `langfuse` (observability), `all` (all providers + langfuse), `test` (pytest suite).
 
+## Agent streaming (tools + reasoning)
+
+For Hof-style tool loops, use [`stream_agent_turn`](llm_markdown/agent_turn.py) with [`ReasoningConfig`](llm_markdown/reasoning.py) so OpenAI and Anthropic apply the same **native / off** policy. See **[docs/agent-streaming.md](docs/agent-streaming.md)** for when `AgentReasoningDelta` appears and provider capability notes.
+
 ## Provider support
 
 | Provider | Included | Native structured output | Images | Streaming | Extra |

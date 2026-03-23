@@ -49,6 +49,26 @@ def _delta_reasoning_text(delta) -> str | None:
     return None
 
 
+def _delta_content_text(delta) -> str | None:
+    """Normalize chat ``delta.content`` to a string (OpenAI may use str or structured parts)."""
+    raw = getattr(delta, "content", None)
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw or None
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                t = item.get("text")
+                if isinstance(t, str) and t:
+                    parts.append(t)
+            elif isinstance(item, str) and item:
+                parts.append(item)
+        return "".join(parts) if parts else None
+    return str(raw) if raw else None
+
+
 def _normalize_image_response(provider_name: str, model: str, response) -> dict:
     images = []
     for item in getattr(response, "data", []) or []:
@@ -245,9 +265,9 @@ class OpenAIProvider(LLMProvider):
                 if fr_chunk:
                     last_seen_finish_reason = fr_chunk
                 delta = ch0.delta
-                c = getattr(delta, "content", None) or None
-                if c:
-                    yield AgentContentDelta(text=c)
+                frag = _delta_content_text(delta)
+                if frag:
+                    yield AgentContentDelta(text=frag)
                 rtext = _delta_reasoning_text(delta)
                 if rtext:
                     yield AgentReasoningDelta(text=rtext)

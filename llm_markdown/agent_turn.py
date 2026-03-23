@@ -1,0 +1,107 @@
+"""Single entry point for one agent model turn with configurable reasoning."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import Any
+
+from llm_markdown.agent_fallback import stream_agent_turn_fallback
+from llm_markdown.agent_stream import (
+    AgentReasoningDelta,
+    AgentStreamEvent,
+)
+from llm_markdown.reasoning import BackendName, ReasoningConfig, ReasoningMode
+
+
+def _filter_reasoning_off(events: Iterator[AgentStreamEvent]) -> Iterator[AgentStreamEvent]:
+    for ev in events:
+        if isinstance(ev, AgentReasoningDelta):
+            continue
+        yield ev
+
+
+def stream_agent_turn(
+    provider: Any,
+    backend: BackendName,
+    messages: list[dict[str, Any]],
+    *,
+    model: str,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = "auto",
+    max_tokens: int | None = None,
+    reasoning: ReasoningConfig | None = None,
+    planning_max_tokens: int | None = None,
+    **kwargs: Any,
+) -> Iterator[AgentStreamEvent]:
+    """Stream one tool-capable model turn as :class:`~llm_markdown.agent_stream.AgentStreamEvent`.
+
+    Dispatches to:
+
+    - ``backend="openai"`` or ``"openrouter"`` →
+      :meth:`~llm_markdown.providers.openai.OpenAIProvider.stream_chat_completion_events`
+    - ``backend="anthropic"`` →
+      :meth:`~llm_markdown.providers.anthropic.AnthropicProvider.stream_messages_events`
+    - ``backend="gemini"`` → not implemented (raises ``ValueError`` from validation).
+
+    ``openrouter`` uses the same client/stream shape as OpenAI.
+
+    ``reasoning.mode``:
+
+    - ``native`` — forward provider-native reasoning/thinking when the API emits it.
+    - ``off`` — filter out ``AgentReasoningDelta``; do not request Anthropic extended thinking.
+    - ``fallback`` — two-phase planning (no tools) as ``AgentReasoningDelta``, then tools
+      (:mod:`llm_markdown.agent_fallback`).
+
+    Raises:
+        ValueError: if :meth:`ReasoningConfig.validate_for_backend` fails or backend is ``gemini``.
+        NotImplementedError: from :func:`~llm_markdown.agent_fallback.stream_agent_turn_fallback`
+            if ``fallback`` is used with an unsupported backend (only ``openai``, ``openrouter``,
+            and ``anthropic`` are supported).
+    """
+    rc = reasoning or ReasoningConfig.native()
+    rc.validate_for_backend(backend)
+
+    if rc.mode is ReasoningMode.FALLBACK:
+        yield from stream_agent_turn_fallback(
+            provider,
+            backend,
+            messages,
+            model=model,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens,
+            planning_max_tokens=planning_max_tokens,
+            **kwargs,
+        )
+        return
+
+    call_kw: dict[str, Any] = dict(kwargs)
+    call_kw["model"] = model
+    if max_tokens is not None:
+        call_kw["max_tokens"] = max_tokens
+    if tools is not None:
+        call_kw["tools"] = tools
+    if tool_choice is not None:
+        call_kw["tool_choice"] = tool_choice
+
+    if backend in ("openai", "openrouter"):
+        if rc.mode is ReasoningMode.NATIVE and rc.openai_extras:
+            call_kw.update(rc.openai_extras)
+        raw = provider.stream_chat_completion_events(messages, **call_kw)
+    elif backend == "anthropic":
+        if rc.mode is ReasoningMode.NATIVE and rc.anthropic_thinking:
+            call_kw["thinking"] = dict(rc.anthropic_thinking)
+        elif rc.mode is ReasoningMode.OFF:
+            call_kw.pop("thinking", None)
+        raw = provider.stream_messages_events(messages, **call_kw)
+    else:
+        msg = f"unknown backend: {backend!r}"
+        raise ValueError(msg)
+
+    if rc.mode is ReasoningMode.OFF:
+        yield from _filter_reasoning_off(raw)
+        return
+    yield from raw
+
+
+__all__ = ["stream_agent_turn"]

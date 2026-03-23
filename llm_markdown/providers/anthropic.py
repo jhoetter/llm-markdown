@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import importlib
+import json
 import time
 from typing import AsyncIterator, Iterator, Union
 
@@ -90,22 +91,88 @@ class AnthropicProvider(LLMProvider):
 
     @classmethod
     def _to_anthropic_messages(cls, messages: list[dict]):
-        system_parts = []
-        converted = []
-        for message in messages:
+        system_parts: list[str] = []
+        converted: list[dict] = []
+        i = 0
+        while i < len(messages):
+            message = messages[i]
             role = message.get("role", "user")
             content = message.get("content", "")
+
             if role == "system":
                 system_parts.append(content if isinstance(content, str) else str(content))
+                i += 1
                 continue
-            if role not in ("user", "assistant"):
+
+            if role == "assistant":
+                tool_calls = message.get("tool_calls")
+                if tool_calls:
+                    blocks: list[dict] = []
+                    if isinstance(content, str) and content.strip():
+                        blocks.append({"type": "text", "text": content})
+                    for tc in tool_calls:
+                        fn = tc.get("function") or {}
+                        arg_s = fn.get("arguments") or "{}"
+                        try:
+                            inp = json.loads(arg_s) if isinstance(arg_s, str) else arg_s
+                        except json.JSONDecodeError:
+                            inp = {"_raw_arguments": arg_s}
+                        if not isinstance(inp, dict):
+                            inp = {"value": inp}
+                        blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": str(tc.get("id") or ""),
+                                "name": str(fn.get("name") or ""),
+                                "input": inp,
+                            }
+                        )
+                    converted.append({"role": "assistant", "content": blocks})
+                    i += 1
+                    tool_results: list[dict] = []
+                    while i < len(messages) and messages[i].get("role") == "tool":
+                        tm = messages[i]
+                        body = tm.get("content", "")
+                        if not isinstance(body, str):
+                            body = json.dumps(body) if body is not None else ""
+                        tool_results.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": str(tm.get("tool_call_id") or ""),
+                                "content": body,
+                            }
+                        )
+                        i += 1
+                    if tool_results:
+                        converted.append({"role": "user", "content": tool_results})
+                    continue
+
+                converted.append(
+                    {
+                        "role": "assistant",
+                        "content": cls._convert_content(content),
+                    }
+                )
+                i += 1
+                continue
+
+            if role == "tool":
+                msg = (
+                    "OpenAI-style tool messages must immediately follow an assistant "
+                    "message that includes tool_calls"
+                )
+                raise ValueError(msg)
+
+            if role != "user":
                 role = "user"
             converted.append(
                 {
                     "role": role,
-                    "content": cls._convert_content(content),
+                    "content": cls._convert_content(message.get("content", "")),
                 }
             )
+            i += 1
+
         return "\n\n".join(system_parts).strip(), converted
 
     def _set_usage(self, usage):

@@ -116,3 +116,35 @@ def test_stream_messages_events_tool_use_finish():
     deltas = [x for x in out if isinstance(x, AgentToolCallDelta)]
     assert any(x.name == "my_tool" for x in deltas)
     assert any(x.arguments == '{"x":1}' for x in deltas)
+
+
+def test_to_anthropic_messages_openai_tool_thread():
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "calling tool",
+            "tool_calls": [
+                {
+                    "id": "tu_1",
+                    "type": "function",
+                    "function": {"name": "add", "arguments": '{"a": 1, "b": 2}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tu_1", "content": '{"result": 3}'},
+    ]
+    system, out = AnthropicProvider._to_anthropic_messages(messages)
+    assert system == ""
+    assert len(out) == 3
+    assert out[0]["role"] == "user"
+    assert out[1]["role"] == "assistant"
+    blocks = out[1]["content"]
+    assert blocks[0] == {"type": "text", "text": "calling tool"}
+    assert blocks[1]["type"] == "tool_use"
+    assert blocks[1]["id"] == "tu_1"
+    assert blocks[1]["name"] == "add"
+    assert blocks[1]["input"] == {"a": 1, "b": 2}
+    assert out[2]["role"] == "user"
+    assert out[2]["content"][0]["type"] == "tool_result"
+    assert out[2]["content"][0]["tool_use_id"] == "tu_1"

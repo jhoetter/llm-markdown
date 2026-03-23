@@ -29,7 +29,7 @@ Prefer **native** API reasoning whenever the model and endpoint support it. Use 
 
 - **NATIVE:** one provider call with tools; emit only what the API provides (`AgentReasoningDelta`, content, tools). No synthetic reasoning text.
 - **OFF:** do not merge `openai_extras` / Anthropic `thinking`; strip `AgentReasoningDelta` from the stream.
-- **FALLBACK:** provider-agnostic **two-phase** turn implemented in [`agent_fallback.py`](../llm_markdown/agent_fallback.py): phase A streams **without tools** (planning instruction appended to the system prompt); assistant text and native thinking deltas are re-emitted as **`AgentReasoningDelta`**. Phase B appends the plan as an assistant message and runs **one tool-capable** turn; provider **`AgentReasoningDelta`** events are **forwarded** (not stripped). Not supported for **`gemini`** (use `openai`, `openrouter`, or `anthropic`).
+- **FALLBACK:** provider-agnostic **two-phase** turn in [`agent_fallback.py`](../llm_markdown/agent_fallback.py): phase A runs **without tools** (planning instruction on the system prompt); its completion is **not** streamed as **`AgentReasoningDelta`** — it is internal context for tool selection only. Phase B appends the plan (wrapped) as an assistant message and runs **one tool-capable** turn; provider-native **`AgentReasoningDelta`** events from phase B are **forwarded**. Not supported for **`gemini`** (use `openai`, `openrouter`, or `anthropic`).
 
 ## When `AgentReasoningDelta` appears
 
@@ -56,8 +56,8 @@ See [`.env.example`](../.env.example). Typical variables:
 - **`LLM_MARKDOWN_AGENT_BACKEND`** — `openai` \| `anthropic` \| `openrouter` (not `gemini` for `stream_agent_turn` yet).
 - **`LLM_MARKDOWN_AGENT_MODEL`** — optional override (per backend defaults exist in tests/examples).
 - **`LLM_MARKDOWN_AGENT_REASONING_MODE`** — `native` \| `off` \| `fallback`. The calculator example
-  script defaults to **`fallback`** when this is unset so `gpt-4o-mini`-style models still emit
-  `AgentReasoningDelta` (planning phase); set **`native`** when your model streams real reasoning on the wire.
+  script defaults to **`fallback`** when this is unset (internal planning + tools); set **`native`**
+  when your model streams real reasoning on the wire.
 
 Provider API keys: **`OPENAI_API_KEY`**, **`ANTHROPIC_API_KEY`**, **`OPENROUTER_API_KEY`**, etc.
 

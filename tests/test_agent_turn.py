@@ -85,12 +85,13 @@ def test_fallback_openai_two_phase_reasoning_before_tool():
     )
     assert isinstance(events[0], AgentSegmentStart)
     assert events[0].segment == "reasoning"
-    idx_reasoning = next(i for i, e in enumerate(events) if isinstance(e, AgentReasoningDelta))
+    # Phase A planning is not streamed as AgentReasoningDelta (internal only).
+    assert not any(isinstance(e, AgentReasoningDelta) for e in events)
     idx_tool = next(i for i, e in enumerate(events) if isinstance(e, AgentToolCallDelta))
     idx_content_seg = next(
         i for i, e in enumerate(events) if isinstance(e, AgentSegmentStart) and e.segment == "content"
     )
-    assert idx_reasoning < idx_content_seg < idx_tool
+    assert idx_content_seg < idx_tool
     assert provider.stream_chat_completion_events.call_count == 2
 
 
@@ -136,12 +137,12 @@ def test_fallback_anthropic_two_phase_reasoning_before_tool():
     )
     assert isinstance(events[0], AgentSegmentStart)
     assert events[0].segment == "reasoning"
-    idx_reasoning = next(i for i, e in enumerate(events) if isinstance(e, AgentReasoningDelta))
+    assert not any(isinstance(e, AgentReasoningDelta) for e in events)
     idx_tool = next(i for i, e in enumerate(events) if isinstance(e, AgentToolCallDelta))
     idx_content_seg = next(
         i for i, e in enumerate(events) if isinstance(e, AgentSegmentStart) and e.segment == "content"
     )
-    assert idx_reasoning < idx_content_seg < idx_tool
+    assert idx_content_seg < idx_tool
     assert provider.stream_messages_events.call_count == 2
 
 
@@ -473,6 +474,89 @@ def test_fallback_phase_a_asks_for_analysis_not_plan():
     assert "language" in lower
     assert "tools" in lower or "tool" in lower
     assert "never shown" in lower or "not shown" in lower
+
+
+def test_fallback_phase_a_silent_planning_not_streamed_as_reasoning():
+    """Phase A completion text must not appear as AgentReasoningDelta (internal only)."""
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "noop", "parameters": {"type": "object", "properties": {}}},
+        },
+    ]
+    phase_a = iter(
+        [
+            AgentContentDelta(text="SECRET_PHASE_A_PLANNING_TEXT"),
+            AgentMessageFinish(finish_reason="stop", usage=None),
+        ]
+    )
+    phase_b = iter(
+        [
+            AgentContentDelta(text="visible reply"),
+            AgentMessageFinish(finish_reason="stop", usage=None),
+        ]
+    )
+    provider = MagicMock()
+    provider.stream_chat_completion_events.side_effect = [phase_a, phase_b]
+    events = list(
+        stream_agent_turn_fallback(
+            provider,
+            "openai",
+            [{"role": "user", "content": "q"}],
+            model="gpt-4o-mini",
+            tools=tools,
+        )
+    )
+    reasoning_concat = "".join(e.text for e in events if isinstance(e, AgentReasoningDelta))
+    assert "SECRET_PHASE_A_PLANNING_TEXT" not in reasoning_concat
+    assert not reasoning_concat  # Phase B had no native reasoning in this mock
+    assert any(isinstance(e, AgentContentDelta) and e.text == "visible reply" for e in events)
+
+
+def test_fallback_phase_b_native_reasoning_flows():
+    """After silent Phase A, provider-native AgentReasoningDelta from Phase B is forwarded."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "add",
+                "description": "Add numbers",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+                    "required": ["a", "b"],
+                },
+            },
+        }
+    ]
+    phase_a = iter(
+        [
+            AgentContentDelta(text="silent plan"),
+            AgentMessageFinish(finish_reason="stop", usage=None),
+        ]
+    )
+    phase_b = iter(
+        [
+            AgentReasoningDelta(text="native from phase b"),
+            AgentToolCallDelta(index=0, tool_call_id="t1", name="add", arguments="{}"),
+            AgentMessageFinish(finish_reason="tool_calls", usage=None),
+        ]
+    )
+    provider = MagicMock()
+    provider.stream_chat_completion_events.side_effect = [phase_a, phase_b]
+    events = list(
+        stream_agent_turn_fallback(
+            provider,
+            "openai",
+            [{"role": "user", "content": "x"}],
+            model="gpt-4o-mini",
+            tools=tools,
+        )
+    )
+    rd = [e for e in events if isinstance(e, AgentReasoningDelta)]
+    assert len(rd) == 1
+    assert rd[0].text == "native from phase b"
+    assert "silent plan" not in rd[0].text
 
 
 def test_fallback_skips_planning_when_no_tools():

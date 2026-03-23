@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from llm_markdown.agent_stream import AgentReasoningDelta, AgentToolCallDelta
+from llm_markdown.agent_stream import AgentSegmentStart, AgentToolCallDelta
 from llm_markdown.agent_turn import stream_agent_turn
 from llm_markdown.providers import AnthropicProvider, OpenAIProvider, OpenRouterProvider
 from llm_markdown.reasoning import BackendName, ReasoningConfig, ReasoningMode
@@ -138,7 +138,8 @@ def test_live_stream_agent_turn_requests_add_tool():
 
 
 @pytest.mark.integration
-def test_live_fallback_emits_reasoning_before_tool_when_configured():
+def test_live_fallback_agentic_segment_before_tool_when_configured():
+    """FALLBACK runs internal planning then tool-capable Phase B; UI sees content lane then tools."""
     if _reasoning_mode() is not ReasoningMode.FALLBACK:
         pytest.skip("set LLM_MARKDOWN_AGENT_REASONING_MODE=fallback")
 
@@ -167,8 +168,11 @@ def test_live_fallback_emits_reasoning_before_tool_when_configured():
             reasoning=ReasoningConfig(mode=ReasoningMode.FALLBACK),
         )
     )
-    idx_r = next((i for i, e in enumerate(events) if isinstance(e, AgentReasoningDelta)), None)
     idx_t = next((i for i, e in enumerate(events) if isinstance(e, AgentToolCallDelta)), None)
-    assert idx_r is not None, "expected at least one AgentReasoningDelta in FALLBACK mode"
     assert idx_t is not None, "expected a tool call"
-    assert idx_r < idx_t, "FALLBACK should stream planning/thinking before tool deltas"
+    tool_names = [e.name for e in events if isinstance(e, AgentToolCallDelta) and e.name]
+    assert "add" in tool_names
+    idx_content_seg = next(
+        i for i, e in enumerate(events) if isinstance(e, AgentSegmentStart) and e.segment == "content"
+    )
+    assert idx_content_seg < idx_t

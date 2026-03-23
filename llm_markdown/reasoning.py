@@ -24,8 +24,9 @@ class ReasoningConfig:
 
     Attributes:
         mode: ``native`` forwards API reasoning; ``off`` filters ``AgentReasoningDelta``;
-            ``fallback`` runs a planning stream (no tools) then a tool turn (see
-            :mod:`llm_markdown.agent_fallback`).
+            ``fallback`` runs an internal planning completion (no tools) then a tool turn (see
+            :mod:`llm_markdown.agent_fallback`); planning text is not streamed as
+            ``AgentReasoningDelta``.
         openai_extras: Extra kwargs merged into OpenAI ``chat.completions.create`` when
             ``mode`` is ``native`` (e.g. model-specific reasoning parameters).
         anthropic_thinking: Passed as ``thinking=...`` to Anthropic ``messages.stream`` when

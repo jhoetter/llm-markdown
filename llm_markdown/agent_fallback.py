@@ -148,7 +148,11 @@ def stream_agent_turn_fallback(
     planning_max_tokens: int | None = None,
     **kwargs: Any,
 ) -> Iterator[AgentStreamEvent]:
-    """Phase A: planning stream (no tools) → ``AgentReasoningDelta``; Phase B: tools + pass-through stream.
+    """Phase A: silent planning completion (no tools); Phase B: tools + pass-through stream.
+
+    Phase A output is **not** emitted as ``AgentReasoningDelta`` — it is only
+    injected into Phase B context.  Native reasoning from the provider in Phase B
+    is still forwarded unchanged.
 
     ``backend`` is ``openai``, ``openrouter`` (OpenAI-compatible), or ``anthropic``.
 
@@ -193,14 +197,15 @@ def stream_agent_turn_fallback(
             **extra,
         )
 
+    # Phase A text is internal only (tool-selection context for Phase B). Do not yield it as
+    # AgentReasoningDelta — that is regular completion output, not provider-native thinking, and
+    # surfaces duplicate / answer-shaped text in UIs that show "reasoning" lanes.
     plan_parts: list[str] = []
     for ev in phase_a:
         if isinstance(ev, AgentContentDelta):
             plan_parts.append(ev.text)
-            yield AgentReasoningDelta(text=ev.text)
         elif isinstance(ev, AgentReasoningDelta):
             plan_parts.append(ev.text)
-            yield ev
         elif isinstance(ev, AgentToolCallDelta):
             continue
         elif isinstance(ev, AgentMessageFinish):

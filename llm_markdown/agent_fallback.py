@@ -14,24 +14,37 @@ from llm_markdown.agent_stream import (
     AgentToolCallDelta,
 )
 
-# Appended to system prompt (or new system message) for phase A only.
+# ---------------------------------------------------------------------------
+# Phase A: metacognitive analysis (no tools).
+#
+# The key insight: asking a model to "write a plan" for a trivial query like
+# "hi" produces answer-shaped text ("Hello! How can I assist you?").  Asking
+# it to *analyze* the request in a structured format produces genuinely
+# different text ("The user is greeting me.  No tools needed.").
+# ---------------------------------------------------------------------------
 _FALLBACK_PLANNING_APPENDIX = (
-    "[Planning phase — no tools yet] Write a brief **internal** plain-text plan only: intent, "
-    "next tool (if any), and step order. A few short sentences. "
-    "**Do not** write the user-facing answer, greeting, summary, or translated prose here — "
-    "that belongs in the next phase after tools. "
-    "**Use the same language as the user's latest message** for this plan (so phase B stays aligned). "
-    "Do not output tool calls or JSON in this turn."
+    "[Hidden reasoning step — your output here is never shown to the user.]\n"
+    "Analyze the user's latest message. Write short internal notes, not a reply:\n"
+    "- Intent: what is the user asking or doing?\n"
+    "- Tools: which tool(s) will you call, or \"none\"?\n"
+    "- Language: what language is the user writing in?\n"
+    "- Approach: one sentence on how you will respond.\n"
+    "Do not greet, answer, or address the user here. Do not output tool calls or JSON."
 )
 
-# Merged into the first system message for phase B (after phase A), before the synthetic plan assistant turn.
+# ---------------------------------------------------------------------------
+# Phase B bridge: injected into the system prompt so the model knows the
+# assistant turn that follows is scratchpad, not prior output.
+# ---------------------------------------------------------------------------
 _FALLBACK_PHASE_B_BRIDGE = (
-    "**Phase B (visible to the user):** The next assistant-role message (if any) is **not** "
-    "what the user saw — it is only internal planning from a hidden first pass. "
-    "Do **not** repeat it verbatim as your reply. Call tools as needed, then write **one** clear "
-    "answer the user should read, **in the same language as the user's latest user message** "
-    "(do not switch languages mid-turn)."
+    "The next assistant-role message is **hidden internal notes** from a reasoning step — "
+    "the user never saw it and it is not part of the conversation.  Ignore its tone and phrasing.  "
+    "Respond to the user's last message directly: call tools if needed, then write one clear reply.  "
+    "Match the language of the **user's message** (not the notes)."
 )
+
+_PLAN_WRAPPER_PREFIX = "[Internal notes — not shown to user]\n"
+_PLAN_WRAPPER_SUFFIX = "\n[End internal notes]"
 
 
 def _inject_planning_system(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -154,7 +167,8 @@ def stream_agent_turn_fallback(
 
     plan_text = "".join(plan_parts).strip() or "(no planning text)"
     msgs_b = _inject_phase_b_bridge(deepcopy(messages))
-    msgs_b.append({"role": "assistant", "content": plan_text})
+    wrapped = _PLAN_WRAPPER_PREFIX + plan_text + _PLAN_WRAPPER_SUFFIX
+    msgs_b.append({"role": "assistant", "content": wrapped})
 
     yield from _phase_b_events(
         provider,

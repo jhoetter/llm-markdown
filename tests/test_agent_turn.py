@@ -429,7 +429,8 @@ def test_anthropic_off_drops_thinking_kw():
     assert "thinking" not in call_kw
 
 
-def test_fallback_phase_b_merges_language_bridge_into_system():
+def test_fallback_phase_b_bridge_and_plan_wrapping():
+    """Phase B injects a bridge into the system message and wraps the plan as internal notes."""
     phase_a = iter(
         [
             AgentContentDelta(text="internal plan"),
@@ -450,7 +451,21 @@ def test_fallback_phase_b_merges_language_bridge_into_system():
     assert provider.stream_chat_completion_events.call_count == 2
     msgs_b = provider.stream_chat_completion_events.call_args_list[1][0][0]
     sys0 = next(m for m in msgs_b if m.get("role") == "system")
-    assert "Phase B" in sys0["content"]
+    assert "internal notes" in sys0["content"].lower()
     assert "language" in sys0["content"].lower()
-    assert msgs_b[-1]["role"] == "assistant"
-    assert msgs_b[-1]["content"] == "internal plan"
+    plan_msg = msgs_b[-1]
+    assert plan_msg["role"] == "assistant"
+    assert plan_msg["content"].startswith("[Internal notes")
+    assert "internal plan" in plan_msg["content"]
+    assert plan_msg["content"].endswith("[End internal notes]")
+
+
+def test_fallback_phase_a_asks_for_analysis_not_plan():
+    """Phase A system appendix should elicit structured analysis, not answer-shaped prose."""
+    from llm_markdown.agent_fallback import _FALLBACK_PLANNING_APPENDIX
+
+    lower = _FALLBACK_PLANNING_APPENDIX.lower()
+    assert "intent" in lower
+    assert "language" in lower
+    assert "tools" in lower or "tool" in lower
+    assert "never shown" in lower or "not shown" in lower

@@ -322,7 +322,7 @@ def test_fallback_think_instruction_injected_into_system():
     sys_content = next(m["content"] for m in called_msgs if m["role"] == "system")
     assert "Be helpful." in sys_content
     assert "<think>" in sys_content
-    assert "NEVER draft" in sys_content
+    assert "FORBIDDEN" in sys_content
     assert "private reasoning" in sys_content.lower()
 
 
@@ -402,7 +402,7 @@ def test_fallback_phase_b_bridge_and_wrapped_plan():
     sys0 = next(m for m in msgs_b if m.get("role") == "system")
     assert "hidden internal planning notes" in sys0["content"].lower()
     assert "language" in sys0["content"].lower()
-    assert "NEVER draft" in sys0["content"]
+    assert "FORBIDDEN" in sys0["content"]
     plan_msg = msgs_b[-1]
     assert plan_msg["role"] == "assistant"
     assert plan_msg["content"].startswith("[Internal notes")

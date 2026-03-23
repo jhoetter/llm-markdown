@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="llm-markdown",
-    version="0.3.12",
+    version="0.3.13",
     author="Johannes Hötter",
     author_email="johannes.hoetter@kern.ai",
     description="Turn Python functions into typed LLM calls using docstrings as prompts",

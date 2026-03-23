@@ -176,3 +176,6 @@ def test_live_fallback_think_tags_reasoning_and_tool():
         i for i, e in enumerate(events) if isinstance(e, AgentSegmentStart) and e.segment == "content"
     )
     assert idx_content_seg < idx_t
+    idx_r = next((i for i, e in enumerate(events) if isinstance(e, AgentReasoningDelta)), None)
+    assert idx_r is not None, "expected Phase A reasoning deltas"
+    assert idx_r < idx_t

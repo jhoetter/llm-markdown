@@ -12,7 +12,7 @@ When `stream_agent_turn(..., tools=[...])` is used with a non-empty tool list, t
 
 Turns **without** tools do **not** emit `AgentSegmentStart` (non-agentic chat completion).
 
-**FALLBACK** uses a single provider call with `<think>` tag parsing; segment markers wrap the iterator so reasoning stays in the reasoning segment until content or tools appear.
+**FALLBACK** is hybrid (see policy below): tool-selection rounds use two provider calls (Phase A forces text-only reasoning, then Phase B with tools); answer rounds use one call with `<think>` tag parsing. Segment markers wrap the combined iterator on agentic turns.
 
 ## Capability matrix (by provider)
 
@@ -29,7 +29,7 @@ Prefer **native** API reasoning whenever the model and endpoint support it. Use 
 
 - **NATIVE:** one provider call with tools; emit only what the API provides (`AgentReasoningDelta`, content, tools). No synthetic reasoning text.
 - **OFF:** do not merge `openai_extras` / Anthropic `thinking`; strip `AgentReasoningDelta` from the stream.
-- **FALLBACK:** provider-agnostic **single-completion** turn with `<think>` tag parsing in [`agent_fallback.py`](../llm_markdown/agent_fallback.py). A thinking-tag instruction is appended to the system prompt; the model writes `<think>reasoning</think>answer` in one stream. Content inside `<think>` tags is emitted as **`AgentReasoningDelta`**; content outside as **`AgentContentDelta`**. Tool calls flow through unchanged. Provider-native **`AgentReasoningDelta`** is also forwarded. Not supported for **`gemini`** (use `openai`, `openrouter`, or `anthropic`).
+- **FALLBACK:** hybrid in [`agent_fallback.py`](../llm_markdown/agent_fallback.py). **Tool-selection** (non-empty `tools`, no `tool` messages in history yet): **Phase A** — one completion **without** tools and a think-tag instruction; all streamed assistant text is emitted as **`AgentReasoningDelta`** (internal notes are also injected for Phase B). **Phase B** — one completion **with** tools; stream is a pass-through (no tag parsing). **Answer rounds** (no tools, or tool results already in history): **one** completion with think-tag parsing — inside `<think>` tags → **`AgentReasoningDelta`**, outside → **`AgentContentDelta`**. Provider-native **`AgentReasoningDelta`** is forwarded where emitted. Not supported for **`gemini`** (use `openai`, `openrouter`, or `anthropic`).
 
 ## When `AgentReasoningDelta` appears
 
@@ -39,7 +39,7 @@ Prefer **native** API reasoning whenever the model and endpoint support it. Use 
 
 - **`native`** (default): Forward provider-native reasoning when the API returns it. Optional `openai_extras` (merged into the OpenAI/OpenRouter request) or `anthropic_thinking` (passed as `thinking=…` on Anthropic) tune behavior where supported.
 - **`off`**: Drop Anthropic `thinking` from the request; do not merge `openai_extras` for OpenAI-compatible backends. Filter out **`AgentReasoningDelta`** from the stream.
-- **`fallback`**: Single-completion with `<think>` tag parsing (see **FALLBACK** above). Cannot be combined with `openai_extras` or `anthropic_thinking` (use **native** for those).
+- **`fallback`**: Hybrid two-phase + think-tags (see **FALLBACK** above). Cannot be combined with `openai_extras` or `anthropic_thinking` (use **native** for those).
 
 ## Entry point
 

@@ -168,15 +168,19 @@ _SIMPLE_TOOLS = [
 ]
 
 
-def test_fallback_openai_think_tags_split_reasoning_and_content():
-    """Content inside <think> becomes AgentReasoningDelta; content outside becomes AgentContentDelta."""
-    completion = iter([
-        AgentContentDelta(text="<think>The user wants to add numbers</think>Let me call the tool."),
+def test_fallback_openai_hybrid_tool_round_two_calls():
+    """Tool round: Phase A streams all text as reasoning; Phase B pass-through (content + tool)."""
+    phase_a = iter([
+        AgentContentDelta(text="The user wants addition; I will call add."),
+        AgentMessageFinish(finish_reason="stop", usage=None),
+    ])
+    phase_b = iter([
+        AgentContentDelta(text="Calling the tool now."),
         AgentToolCallDelta(index=0, tool_call_id="t1", name="add", arguments='{"a":1,"b":2}'),
         AgentMessageFinish(finish_reason="tool_calls", usage=None),
     ])
     provider = MagicMock()
-    provider.stream_chat_completion_events.return_value = completion
+    provider.stream_chat_completion_events.side_effect = [phase_a, phase_b]
 
     events = list(
         stream_agent_turn(
@@ -190,20 +194,24 @@ def test_fallback_openai_think_tags_split_reasoning_and_content():
     reasoning = [e for e in events if isinstance(e, AgentReasoningDelta)]
     content = [e for e in events if isinstance(e, AgentContentDelta)]
     tools = [e for e in events if isinstance(e, AgentToolCallDelta)]
-    assert any("add numbers" in e.text for e in reasoning)
-    assert any("call the tool" in e.text for e in content)
+    assert any("addition" in e.text for e in reasoning)
+    assert any("Calling the tool" in e.text for e in content)
     assert len(tools) == 1
-    assert provider.stream_chat_completion_events.call_count == 1
+    assert provider.stream_chat_completion_events.call_count == 2
 
 
-def test_fallback_anthropic_think_tags_split():
-    """Same behavior on anthropic backend."""
-    completion = iter([
-        AgentContentDelta(text="<think>greeting</think>Hello!"),
+def test_fallback_anthropic_hybrid_tool_round_two_calls():
+    """Anthropic: two calls for tool round; Phase A all reasoning, Phase B split path."""
+    phase_a = iter([
+        AgentContentDelta(text="User said hi; no tool needed yet in plan."),
+        AgentMessageFinish(finish_reason="end_turn", usage=None),
+    ])
+    phase_b = iter([
+        AgentContentDelta(text="Hello!"),
         AgentMessageFinish(finish_reason="end_turn", usage=None),
     ])
     provider = MagicMock()
-    provider.stream_messages_events.return_value = completion
+    provider.stream_messages_events.side_effect = [phase_a, phase_b]
 
     events = list(
         stream_agent_turn(
@@ -216,9 +224,9 @@ def test_fallback_anthropic_think_tags_split():
     )
     reasoning = [e for e in events if isinstance(e, AgentReasoningDelta)]
     content = [e for e in events if isinstance(e, AgentContentDelta)]
-    assert any("greeting" in e.text for e in reasoning)
+    assert any("User said hi" in e.text for e in reasoning)
     assert any("Hello!" in e.text for e in content)
-    assert provider.stream_messages_events.call_count == 1
+    assert provider.stream_messages_events.call_count == 2
 
 
 def test_fallback_no_think_tags_all_content():
@@ -334,19 +342,84 @@ def test_fallback_think_instruction_added_when_no_system():
     assert "<think>" in called_msgs[0]["content"]
 
 
+def test_fallback_post_tool_history_single_call_think_split():
+    """History with tool results → one completion; think tags split reasoning vs content."""
+    completion = iter([
+        AgentContentDelta(text="<think>Total is 10 from stats.</think>You have 10 expenses."),
+        AgentMessageFinish(finish_reason="stop", usage=None),
+    ])
+    provider = MagicMock()
+    provider.stream_chat_completion_events.return_value = completion
+    msgs = [
+        {"role": "user", "content": "how many?"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "get_stats", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"total": 10}'},
+    ]
+    tools = [{"type": "function", "function": {"name": "get_stats", "parameters": {}}}]
+
+    events = list(
+        stream_agent_turn_fallback(
+            provider, "openai", msgs, model="gpt-4o-mini", tools=tools,
+        )
+    )
+    assert provider.stream_chat_completion_events.call_count == 1
+    reasoning = "".join(e.text for e in events if isinstance(e, AgentReasoningDelta))
+    content = "".join(e.text for e in events if isinstance(e, AgentContentDelta))
+    assert "Total is 10" in reasoning
+    assert "10 expenses" in content
+
+
+def test_fallback_phase_b_bridge_and_wrapped_plan():
+    """Tool round: Phase B system gets bridge; last message is wrapped internal notes."""
+    tools = [
+        {"type": "function", "function": {"name": "greet", "parameters": {"type": "object", "properties": {}}}},
+    ]
+    phase_a = iter([
+        AgentContentDelta(text="internal plan text"),
+        AgentMessageFinish(finish_reason="stop", usage=None),
+    ])
+    phase_b = iter([AgentMessageFinish(finish_reason="stop", usage=None)])
+    provider = MagicMock()
+    provider.stream_chat_completion_events.side_effect = [phase_a, phase_b]
+    list(
+        stream_agent_turn_fallback(
+            provider,
+            "openai",
+            [{"role": "system", "content": "App policy."}, {"role": "user", "content": "Hello"}],
+            model="gpt-4o-mini",
+            tools=tools,
+        )
+    )
+    assert provider.stream_chat_completion_events.call_count == 2
+    msgs_b = provider.stream_chat_completion_events.call_args_list[1][0][0]
+    sys0 = next(m for m in msgs_b if m.get("role") == "system")
+    assert "internal notes" in sys0["content"].lower()
+    assert "language" in sys0["content"].lower()
+    plan_msg = msgs_b[-1]
+    assert plan_msg["role"] == "assistant"
+    assert plan_msg["content"].startswith("[Internal notes")
+    assert "internal plan text" in plan_msg["content"]
+    assert plan_msg["content"].endswith("[End internal notes]")
+
+
 # ---------------------------------------------------------------------------
 # Agentic segment markers
 # ---------------------------------------------------------------------------
 
 def test_fallback_agentic_segments_with_think_tags():
-    """With tools, reasoning segment opens first; content segment starts before tool calls."""
-    completion = iter([
-        AgentContentDelta(text="<think>plan</think>"),
+    """With tools: Phase A reasoning, then content segment before tool in Phase B."""
+    phase_a = iter([
+        AgentContentDelta(text="I need the add tool."),
+        AgentMessageFinish(finish_reason="stop", usage=None),
+    ])
+    phase_b = iter([
         AgentToolCallDelta(index=0, tool_call_id="t1", name="add", arguments="{}"),
         AgentMessageFinish(finish_reason="tool_calls", usage=None),
     ])
     provider = MagicMock()
-    provider.stream_chat_completion_events.return_value = completion
+    provider.stream_chat_completion_events.side_effect = [phase_a, phase_b]
 
     events = list(
         stream_agent_turn(

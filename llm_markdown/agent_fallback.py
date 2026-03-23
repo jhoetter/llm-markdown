@@ -1,10 +1,16 @@
-"""Single-completion fallback with ``<think>`` tags for :class:`~llm_markdown.reasoning.ReasoningMode.FALLBACK`.
+"""Hybrid FALLBACK for :class:`~llm_markdown.reasoning.ReasoningMode.FALLBACK`.
 
-Instead of two API calls (plan then answer), injects a thinking-tag instruction
-into the system prompt so the model writes ``<think>reasoning</think>answer`` in
-one stream.  A streaming parser splits the content into ``AgentReasoningDelta``
-(inside tags) and ``AgentContentDelta`` (outside tags).  Tool calls flow through
-unchanged because they are a separate field on the provider delta.
+**Tool-selection rounds** (non-empty ``tools`` and no ``tool`` messages in history):
+two provider calls. Phase A has no tools, so the model must emit text; that
+stream is parsed with :class:`ThinkTagParser` but **every** text chunk is
+emitted as :class:`~llm_markdown.agent_stream.AgentReasoningDelta` (all internal).
+The raw completion is injected into Phase B as hidden notes, then Phase B runs
+with tools and is a **pass-through** stream (no tag parsing).
+
+**Answer rounds** (no tools, or tool results already in history): a single
+completion with a thinking-tag instruction; the parser splits streamed text so
+that segments inside the think delimiters become ``AgentReasoningDelta`` and
+segments outside become ``AgentContentDelta``.
 """
 
 from __future__ import annotations
@@ -32,9 +38,19 @@ _THINK_TAG_INSTRUCTION = (
     "Always reply in the same language as the user's message."
 )
 
+_FALLBACK_PHASE_B_BRIDGE = (
+    "The next assistant-role message is **hidden internal notes** from a reasoning step — "
+    "the user never saw it and it is not part of the conversation.  Ignore its tone and phrasing.  "
+    "Respond to the user's last message directly: call tools if needed, then write one clear reply.  "
+    "Match the language of the **user's message** (not the notes)."
+)
+
+_PLAN_WRAPPER_PREFIX = "[Internal notes — not shown to user]\n"
+_PLAN_WRAPPER_SUFFIX = "\n[End internal notes]"
+
 
 class ThinkTagParser:
-    """Streaming state machine that splits text on ``<think>``/``</think>`` boundaries.
+    """Streaming state machine that splits text on ``</think>`` boundaries.
 
     Feed chunks of text as they arrive from the provider.  The parser yields
     ``(role, text)`` pairs where *role* is ``"reasoning"`` (inside tags) or
@@ -113,6 +129,37 @@ def _inject_system_suffix(
     return [{"role": "system", "content": suffix}, *out]
 
 
+def _inject_phase_b_bridge(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = deepcopy(messages)
+    for i, m in enumerate(out):
+        if m.get("role") == "system":
+            c = m.get("content")
+            if isinstance(c, str) and c.strip():
+                out[i] = {
+                    **m,
+                    "content": c.rstrip() + "\n\n" + _FALLBACK_PHASE_B_BRIDGE,
+                }
+                return out
+            break
+    return [{"role": "system", "content": _FALLBACK_PHASE_B_BRIDGE}, *out]
+
+
+def _has_tool_results(messages: list[dict[str, Any]]) -> bool:
+    return any(m.get("role") == "tool" for m in messages)
+
+
+def _needs_planning(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> bool:
+    """True when a separate no-tools Phase A should run before the tool-capable Phase B."""
+    if not tools:
+        return False
+    if _has_tool_results(messages):
+        return False
+    return True
+
+
 def _stream_completion(
     provider: Any,
     backend: str,
@@ -144,45 +191,12 @@ def _stream_completion(
         raise ValueError(msg)
 
 
-def stream_agent_turn_fallback(
-    provider: Any,
-    backend: str,
-    messages: list[dict[str, Any]],
-    *,
-    model: str,
-    tools: list[dict[str, Any]] | None = None,
-    tool_choice: str | dict[str, Any] | None = "auto",
-    max_tokens: int | None = None,
-    planning_max_tokens: int | None = None,
-    **kwargs: Any,
+def _yield_think_tag_split_stream(
+    events: Iterator[AgentStreamEvent],
 ) -> Iterator[AgentStreamEvent]:
-    """Single completion with ``<think>`` tag parsing for reasoning/content separation.
-
-    The system prompt is augmented with a thinking-tag instruction.  Content
-    inside ``<think>...</think>`` tags is emitted as ``AgentReasoningDelta``;
-    content outside is emitted as ``AgentContentDelta``.  Tool calls flow
-    through unchanged.  Provider-native ``AgentReasoningDelta`` (e.g. from
-    a model with real extended thinking) is also forwarded.
-
-    ``backend`` is ``openai``, ``openrouter`` (OpenAI-compatible), or ``anthropic``.
-    """
-    if backend not in ("openai", "openrouter", "anthropic"):
-        msg = f"FALLBACK not implemented for backend={backend!r}"
-        raise NotImplementedError(msg)
-
-    msgs = _inject_system_suffix(messages, _THINK_TAG_INSTRUCTION)
+    """Map content through :class:`ThinkTagParser`; reasoning vs content by tag position."""
     parser = ThinkTagParser()
-
-    for ev in _stream_completion(
-        provider,
-        backend,
-        msgs,
-        model=model,
-        tools=tools,
-        tool_choice=tool_choice,
-        max_tokens=max_tokens,
-        kwargs=kwargs,
-    ):
+    for ev in events:
         if isinstance(ev, AgentContentDelta):
             for role, text in parser.feed(ev.text):
                 if role == "reasoning":
@@ -202,6 +216,113 @@ def stream_agent_turn_fallback(
             yield ev
         else:
             yield ev
+
+
+def _stream_phase_a_all_reasoning(
+    provider: Any,
+    backend: str,
+    messages: list[dict[str, Any]],
+    *,
+    model: str,
+    plan_cap: int,
+    kwargs: dict[str, Any],
+    plan_parts: list[str],
+) -> Iterator[AgentStreamEvent]:
+    """No-tools completion; every content chunk is emitted as ``AgentReasoningDelta``."""
+    msgs = _inject_system_suffix(messages, _THINK_TAG_INSTRUCTION)
+    extra = {k: v for k, v in kwargs.items() if k not in ("tools", "tool_choice")}
+    stream = _stream_completion(
+        provider,
+        backend,
+        msgs,
+        model=model,
+        tools=None,
+        tool_choice=None,
+        max_tokens=plan_cap,
+        kwargs=extra,
+    )
+    parser = ThinkTagParser()
+    for ev in stream:
+        if isinstance(ev, AgentContentDelta):
+            plan_parts.append(ev.text)
+            for _role, chunk in parser.feed(ev.text):
+                if chunk:
+                    yield AgentReasoningDelta(text=chunk)
+        elif isinstance(ev, AgentReasoningDelta):
+            plan_parts.append(ev.text)
+            yield ev
+        elif isinstance(ev, AgentMessageFinish):
+            for _role, chunk in parser.flush():
+                if chunk:
+                    yield AgentReasoningDelta(text=chunk)
+            break
+        else:
+            yield ev
+
+
+def stream_agent_turn_fallback(
+    provider: Any,
+    backend: str,
+    messages: list[dict[str, Any]],
+    *,
+    model: str,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = "auto",
+    max_tokens: int | None = None,
+    planning_max_tokens: int | None = None,
+    **kwargs: Any,
+) -> Iterator[AgentStreamEvent]:
+    """Hybrid FALLBACK: two-phase for tool selection, think-tags for answer rounds.
+
+    See module docstring.  ``backend`` is ``openai``, ``openrouter``, or ``anthropic``.
+    """
+    if backend not in ("openai", "openrouter", "anthropic"):
+        msg = f"FALLBACK not implemented for backend={backend!r}"
+        raise NotImplementedError(msg)
+
+    if not _needs_planning(messages, tools):
+        msgs = _inject_system_suffix(messages, _THINK_TAG_INSTRUCTION)
+        yield from _yield_think_tag_split_stream(
+            _stream_completion(
+                provider,
+                backend,
+                msgs,
+                model=model,
+                tools=tools,
+                tool_choice=tool_choice,
+                max_tokens=max_tokens,
+                kwargs=kwargs,
+            )
+        )
+        return
+
+    plan_cap = planning_max_tokens if planning_max_tokens is not None else min(512, max_tokens or 1024)
+    plan_parts: list[str] = []
+    yield from _stream_phase_a_all_reasoning(
+        provider,
+        backend,
+        messages,
+        model=model,
+        plan_cap=plan_cap,
+        kwargs=kwargs,
+        plan_parts=plan_parts,
+    )
+
+    plan_text = "".join(plan_parts).strip() or "(no planning text)"
+    msgs_b = _inject_phase_b_bridge(deepcopy(messages))
+    wrapped = _PLAN_WRAPPER_PREFIX + plan_text + _PLAN_WRAPPER_SUFFIX
+    msgs_b.append({"role": "assistant", "content": wrapped})
+
+    yield from _stream_completion(
+        provider,
+        backend,
+        msgs_b,
+        model=model,
+        tools=tools,
+        tool_choice=tool_choice,
+        max_tokens=max_tokens,
+        kwargs=kwargs,
+    )
 
 
 __all__ = ["stream_agent_turn_fallback", "ThinkTagParser"]

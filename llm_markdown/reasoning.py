@@ -24,9 +24,10 @@ class ReasoningConfig:
 
     Attributes:
         mode: ``native`` forwards API reasoning; ``off`` filters ``AgentReasoningDelta``;
-            ``fallback`` injects a ``<think>`` tag instruction and parses the stream —
-            content inside tags becomes ``AgentReasoningDelta``, content outside becomes
-            ``AgentContentDelta`` (see :mod:`llm_markdown.agent_fallback`).
+            ``fallback`` uses a hybrid in :mod:`llm_markdown.agent_fallback`: two-phase
+            planning (no tools, then tools) for tool-selection rounds, with all Phase A
+            text as ``AgentReasoningDelta``; answer rounds use one completion with think-tag
+            parsing (inside tags → ``AgentReasoningDelta``, outside → ``AgentContentDelta``).
         openai_extras: Extra kwargs merged into OpenAI ``chat.completions.create`` when
             ``mode`` is ``native`` (e.g. model-specific reasoning parameters).
         anthropic_thinking: Passed as ``thinking=...`` to Anthropic ``messages.stream`` when

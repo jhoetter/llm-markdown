@@ -148,3 +148,42 @@ def test_stream_passes_token_param(model, expected):
         list(provider.stream_chat_completion_events([{"role": "user", "content": "z"}]))
 
     assert expected in captured
+
+
+def test_stream_finish_reason_preserved_when_usage_chunk_has_no_choices():
+    """Some streams emit a final usage-only chunk with choices=[]; keep prior finish_reason."""
+    tc0 = SimpleNamespace(index=0, id="c1", function=SimpleNamespace(name="foo", arguments="{}"))
+    chunks = [
+        _chunk(_choice_delta(None, tool_calls=[tc0])),
+        _chunk(
+            SimpleNamespace(
+                delta=SimpleNamespace(content=None, tool_calls=None),
+                finish_reason="tool_calls",
+            ),
+            usage=SimpleNamespace(
+                prompt_tokens=10,
+                completion_tokens=2,
+                total_tokens=12,
+            ),
+        ),
+        _chunk(None, usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2, total_tokens=12)),
+    ]
+
+    provider = OpenAIProvider(api_key="k", model="gpt-4o-mini")
+    mock_create = MagicMock(return_value=iter(chunks))
+
+    with patch.object(provider.client.chat.completions, "create", mock_create):
+        events = list(
+            provider.stream_chat_completion_events(
+                [{"role": "user", "content": "x"}],
+                tools=[{"type": "function", "function": {"name": "foo", "parameters": {}}}],
+            )
+        )
+
+    fin: AgentMessageFinish = events[-1]
+    assert fin.finish_reason == "tool_calls"
+    assert fin.usage == {
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+        "total_tokens": 12,
+    }

@@ -231,6 +231,7 @@ class OpenAIProvider(LLMProvider):
             last_chunk: object | None = None
             last_choice_chunk: object | None = None
             last_usage: dict | None = None
+            last_seen_finish_reason: str | None = None
             for chunk in stream:
                 last_chunk = chunk
                 u = _extract_chunk_usage(chunk)
@@ -240,6 +241,9 @@ class OpenAIProvider(LLMProvider):
                     continue
                 last_choice_chunk = chunk
                 ch0 = chunk.choices[0]
+                fr_chunk = getattr(ch0, "finish_reason", None)
+                if fr_chunk:
+                    last_seen_finish_reason = fr_chunk
                 delta = ch0.delta
                 c = getattr(delta, "content", None) or None
                 if c:
@@ -269,8 +273,8 @@ class OpenAIProvider(LLMProvider):
                             arguments=arg_frag,
                         )
 
-            finish_reason: str | None = None
-            if last_choice_chunk and last_choice_chunk.choices:
+            finish_reason = last_seen_finish_reason
+            if finish_reason is None and last_choice_chunk and last_choice_chunk.choices:
                 fr = getattr(last_choice_chunk.choices[0], "finish_reason", None)
                 if fr:
                     finish_reason = fr

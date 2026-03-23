@@ -16,9 +16,21 @@ from llm_markdown.agent_stream import (
 
 # Appended to system prompt (or new system message) for phase A only.
 _FALLBACK_PLANNING_APPENDIX = (
-    "[Planning phase — no tools yet] Write a brief plain-text plan: what the user wants, "
-    "which tool you will use next (if any), and why. A few short sentences. "
+    "[Planning phase — no tools yet] Write a brief **internal** plain-text plan only: intent, "
+    "next tool (if any), and step order. A few short sentences. "
+    "**Do not** write the user-facing answer, greeting, summary, or translated prose here — "
+    "that belongs in the next phase after tools. "
+    "**Use the same language as the user's latest message** for this plan (so phase B stays aligned). "
     "Do not output tool calls or JSON in this turn."
+)
+
+# Merged into the first system message for phase B (after phase A), before the synthetic plan assistant turn.
+_FALLBACK_PHASE_B_BRIDGE = (
+    "**Phase B (visible to the user):** The next assistant-role message (if any) is **not** "
+    "what the user saw — it is only internal planning from a hidden first pass. "
+    "Do **not** repeat it verbatim as your reply. Call tools as needed, then write **one** clear "
+    "answer the user should read, **in the same language as the user's latest user message** "
+    "(do not switch languages mid-turn)."
 )
 
 
@@ -35,6 +47,21 @@ def _inject_planning_system(messages: list[dict[str, Any]]) -> list[dict[str, An
                 return out
             break
     return [{"role": "system", "content": _FALLBACK_PLANNING_APPENDIX}, *out]
+
+
+def _inject_phase_b_bridge(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = deepcopy(messages)
+    for i, m in enumerate(out):
+        if m.get("role") == "system":
+            c = m.get("content")
+            if isinstance(c, str) and c.strip():
+                out[i] = {
+                    **m,
+                    "content": c.rstrip() + "\n\n" + _FALLBACK_PHASE_B_BRIDGE,
+                }
+                return out
+            break
+    return [{"role": "system", "content": _FALLBACK_PHASE_B_BRIDGE}, *out]
 
 
 def _phase_b_events(
@@ -126,7 +153,7 @@ def stream_agent_turn_fallback(
             yield ev
 
     plan_text = "".join(plan_parts).strip() or "(no planning text)"
-    msgs_b = deepcopy(messages)
+    msgs_b = _inject_phase_b_bridge(deepcopy(messages))
     msgs_b.append({"role": "assistant", "content": plan_text})
 
     yield from _phase_b_events(

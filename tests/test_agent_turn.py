@@ -14,6 +14,7 @@ from llm_markdown.agent_stream import (
     AgentSegmentStart,
     AgentToolCallDelta,
 )
+from llm_markdown.agent_fallback import stream_agent_turn_fallback
 from llm_markdown.agent_turn import stream_agent_turn
 from llm_markdown.providers.anthropic import AnthropicProvider
 from llm_markdown.providers.openai import OpenAIProvider
@@ -426,3 +427,30 @@ def test_anthropic_off_drops_thinking_kw():
         )
     call_kw = mock_stream.call_args.kwargs
     assert "thinking" not in call_kw
+
+
+def test_fallback_phase_b_merges_language_bridge_into_system():
+    phase_a = iter(
+        [
+            AgentContentDelta(text="internal plan"),
+            AgentMessageFinish(finish_reason="stop", usage=None),
+        ]
+    )
+    phase_b = iter([AgentMessageFinish(finish_reason="stop", usage=None)])
+    provider = MagicMock()
+    provider.stream_chat_completion_events.side_effect = [phase_a, phase_b]
+    list(
+        stream_agent_turn_fallback(
+            provider,
+            "openai",
+            [{"role": "system", "content": "App policy."}, {"role": "user", "content": "Hello"}],
+            model="gpt-4o-mini",
+        )
+    )
+    assert provider.stream_chat_completion_events.call_count == 2
+    msgs_b = provider.stream_chat_completion_events.call_args_list[1][0][0]
+    sys0 = next(m for m in msgs_b if m.get("role") == "system")
+    assert "Phase B" in sys0["content"]
+    assert "language" in sys0["content"].lower()
+    assert msgs_b[-1]["role"] == "assistant"
+    assert msgs_b[-1]["content"] == "internal plan"

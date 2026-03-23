@@ -5,6 +5,14 @@ import openai
 from .base import LLMProvider
 from typing import Union, Iterator, AsyncIterator
 
+from llm_markdown.agent_stream import (
+    AgentContentDelta,
+    AgentMessageFinish,
+    AgentReasoningDelta,
+    AgentStreamEvent,
+    AgentToolCallDelta,
+)
+
 _MODERN_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 
 
@@ -29,6 +37,15 @@ def _extract_chunk_usage(chunk) -> dict | None:
             "completion_tokens": getattr(chunk.usage, "completion_tokens", None),
             "total_tokens": getattr(chunk.usage, "total_tokens", None),
         }
+    return None
+
+
+def _delta_reasoning_text(delta) -> str | None:
+    for key in ("reasoning_content", "reasoning"):
+        frag = getattr(delta, key, None)
+        if frag is None:
+            continue
+        return frag if isinstance(frag, str) else str(frag)
     return None
 
 
@@ -169,6 +186,108 @@ class OpenAIProvider(LLMProvider):
         self._last_usage = _extract_usage(response)
         self._capture_metadata(response, started_at=started)
         return response.choices[0].message.content
+
+    def stream_chat_completion_events(
+        self, messages: list[dict], **kwargs
+    ) -> Iterator[AgentStreamEvent]:
+        """Stream one chat completion as normalized agent events.
+
+        Yields :class:`~llm_markdown.agent_stream.AgentContentDelta`,
+        :class:`~llm_markdown.agent_stream.AgentReasoningDelta`,
+        :class:`~llm_markdown.agent_stream.AgentToolCallDelta`, and a final
+        :class:`~llm_markdown.agent_stream.AgentMessageFinish`.
+
+        Accepts the same extra kwargs as ``chat.completions.create`` (e.g.
+        ``tools``, ``tool_choice``, ``temperature``). ``stream`` is forced
+        True. Optional ``model`` overrides the provider's default model.
+
+        Uses ``stream_options={"include_usage": True}`` when supported.
+        """
+        started = time.perf_counter()
+        kw = dict(kwargs)
+        kw.pop("stream", None)
+        model = kw.pop("model", self.model)
+        request_kwargs = self._request_options(kw)
+
+        def _create_stream():
+            try:
+                return self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    **request_kwargs,
+                )
+            except TypeError:
+                return self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    **request_kwargs,
+                )
+
+        def _gen() -> Iterator[AgentStreamEvent]:
+            stream = self._call_with_retries(_create_stream)
+            last_chunk: object | None = None
+            last_choice_chunk: object | None = None
+            last_usage: dict | None = None
+            for chunk in stream:
+                last_chunk = chunk
+                u = _extract_chunk_usage(chunk)
+                if u:
+                    last_usage = u
+                if not chunk.choices:
+                    continue
+                last_choice_chunk = chunk
+                ch0 = chunk.choices[0]
+                delta = ch0.delta
+                c = getattr(delta, "content", None) or None
+                if c:
+                    yield AgentContentDelta(text=c)
+                rtext = _delta_reasoning_text(delta)
+                if rtext:
+                    yield AgentReasoningDelta(text=rtext)
+                tcd = getattr(delta, "tool_calls", None)
+                if tcd:
+                    for tc in tcd:
+                        idx = int(tc.index)
+                        tid = getattr(tc, "id", None) or None
+                        fn = getattr(tc, "function", None)
+                        nm = None
+                        arg_frag = None
+                        if fn is not None:
+                            nm = getattr(fn, "name", None) or None
+                            if not nm:
+                                nm = None
+                            a = getattr(fn, "arguments", None) or None
+                            if a:
+                                arg_frag = a if isinstance(a, str) else str(a)
+                        yield AgentToolCallDelta(
+                            index=idx,
+                            tool_call_id=tid,
+                            name=nm,
+                            arguments=arg_frag,
+                        )
+
+            finish_reason: str | None = None
+            if last_choice_chunk and last_choice_chunk.choices:
+                fr = getattr(last_choice_chunk.choices[0], "finish_reason", None)
+                if fr:
+                    finish_reason = fr
+
+            self._last_usage = last_usage
+            self._last_response_metadata = {
+                "provider": type(self).__name__,
+                "model": model,
+                "response_id": getattr(last_chunk, "id", None) if last_chunk else None,
+                "request_id": getattr(last_chunk, "id", None) if last_chunk else None,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "retry_attempts": self._last_retry_attempts,
+                "token_usage": self._last_usage,
+            }
+            yield AgentMessageFinish(finish_reason=finish_reason, usage=last_usage)
+
+        return _gen()
 
     async def complete_async(
         self, messages: list[dict], **kwargs

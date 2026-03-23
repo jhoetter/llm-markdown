@@ -200,8 +200,8 @@ def test_fallback_openai_hybrid_tool_round_two_calls():
     assert provider.stream_chat_completion_events.call_count == 2
     msgs_a = provider.stream_chat_completion_events.call_args_list[0][0][0]
     sys_a = next(m for m in msgs_a if m.get("role") == "system")
-    assert "Do NOT write a response" in sys_a["content"]
-    assert "analytical notes" in sys_a["content"].lower()
+    assert "forbidden:" in sys_a["content"].lower()
+    assert "- intent:" in sys_a["content"].lower()
 
 
 def test_fallback_anthropic_hybrid_tool_round_two_calls():

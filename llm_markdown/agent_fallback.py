@@ -3,7 +3,7 @@
 **Tool-selection rounds** (non-empty ``tools`` and no ``tool`` messages in history):
 two provider calls. Phase A has no tools, so the model must emit text; that
 emits :class:`~llm_markdown.agent_stream.AgentReasoningDelta` only (no think-tag
-split; instruction elicits short analytical notes, not a user-facing reply).
+split; instruction elicits structured intent/tools lines, not a user-facing reply).
 The planning text is injected into Phase B as hidden notes (OpenAI-style
 ``assistant`` prefill; **Anthropic** uses a synthetic final ``user`` message —
 Claude rejects assistant prefill on some models), then Phase B runs with tools
@@ -34,12 +34,14 @@ _OPEN_TAG = "<think>"
 _CLOSE_TAG = "</think>"
 
 _PHASE_A_INSTRUCTION = (
-    "[Internal reasoning step — output is never shown to the user]\n"
-    "Briefly analyze the request: what does the user want, which tools "
-    "(if any) should you call, what language are they using, and your "
-    "approach in one sentence.\n"
-    "Do NOT write a response to the user. Do NOT greet or address them. "
-    "Only write short analytical notes."
+    "[Internal reasoning — never shown to the user]\n"
+    "Reply with exactly 3–5 lines in this format only (no other prose, no preamble):\n"
+    "- intent: …\n"
+    "- language: …\n"
+    "- tools: … (none or comma-separated names)\n"
+    "- plan: … (one short clause)\n"
+    "Forbidden: greetings, offers to help, addressing the user, emoji, or any text that "
+    "could appear as a chat reply. If you write anything user-facing, the step fails."
 )
 
 _THINK_TAG_INSTRUCTION = (

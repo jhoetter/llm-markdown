@@ -56,6 +56,17 @@ The **environment name** is required because the workflow uses `environment: nam
 
 In the GitHub repo **Settings → Environments**, create an environment named **`pypi`** (same as hof-engine). Add protection rules if you want (e.g. required reviewers) before the job can publish.
 
+### Downstream: hof-engine lockfile
+
+**hof-engine** depends on **`llm-markdown[openai]>=0.3.6`** from PyPI (agent streaming + `ReasoningMode.fallback`). After **this** package version is published and visible on [pypi.org/project/llm-markdown](https://pypi.org/project/llm-markdown/), refresh the engine lockfile:
+
+```bash
+cd /path/to/hof-engine
+uv lock
+```
+
+Until the new version exists on PyPI, `uv lock` there will not resolve — publish first, then lock.
+
 ### How to release (“CLI”)
 
 Pushing an annotated tag **`vX.Y.Z`** that matches `setup.py` / `__version__` runs [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) and uploads to PyPI (same as **workflow_dispatch** / GitHub Release).

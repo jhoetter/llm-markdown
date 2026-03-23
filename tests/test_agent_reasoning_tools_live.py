@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from llm_markdown.agent_stream import AgentSegmentStart, AgentToolCallDelta
+from llm_markdown.agent_stream import AgentReasoningDelta, AgentSegmentStart, AgentToolCallDelta
 from llm_markdown.agent_turn import stream_agent_turn
 from llm_markdown.providers import AnthropicProvider, OpenAIProvider, OpenRouterProvider
 from llm_markdown.reasoning import BackendName, ReasoningConfig, ReasoningMode
@@ -138,8 +138,8 @@ def test_live_stream_agent_turn_requests_add_tool():
 
 
 @pytest.mark.integration
-def test_live_fallback_agentic_segment_before_tool_when_configured():
-    """FALLBACK runs internal planning then tool-capable Phase B; UI sees content lane then tools."""
+def test_live_fallback_think_tags_reasoning_and_tool():
+    """FALLBACK uses <think> tags; reasoning streams as AgentReasoningDelta, then tool call."""
     if _reasoning_mode() is not ReasoningMode.FALLBACK:
         pytest.skip("set LLM_MARKDOWN_AGENT_REASONING_MODE=fallback")
 

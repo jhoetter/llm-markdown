@@ -1,4 +1,11 @@
-"""Two-phase planning + tools stream for :class:`~llm_markdown.reasoning.ReasoningMode.FALLBACK`."""
+"""Single-completion fallback with ``<think>`` tags for :class:`~llm_markdown.reasoning.ReasoningMode.FALLBACK`.
+
+Instead of two API calls (plan then answer), injects a thinking-tag instruction
+into the system prompt so the model writes ``<think>reasoning</think>answer`` in
+one stream.  A streaming parser splits the content into ``AgentReasoningDelta``
+(inside tags) and ``AgentContentDelta`` (outside tags).  Tool calls flow through
+unchanged because they are a separate field on the provider delta.
+"""
 
 from __future__ import annotations
 
@@ -14,70 +21,99 @@ from llm_markdown.agent_stream import (
     AgentToolCallDelta,
 )
 
-# ---------------------------------------------------------------------------
-# Phase A: metacognitive analysis (no tools).
-#
-# The key insight: asking a model to "write a plan" for a trivial query like
-# "hi" produces answer-shaped text ("Hello! How can I assist you?").  Asking
-# it to *analyze* the request in a structured format produces genuinely
-# different text ("The user is greeting me.  No tools needed.").
-# ---------------------------------------------------------------------------
-_FALLBACK_PLANNING_APPENDIX = (
-    "[Hidden reasoning step — your output here is never shown to the user.]\n"
-    "Analyze the user's latest message. Write short internal notes, not a reply:\n"
-    "- Intent: what is the user asking or doing?\n"
-    "- Tools: which tool(s) will you call, or \"none\"?\n"
-    "- Language: what language is the user writing in?\n"
-    "- Approach: one sentence on how you will respond.\n"
-    "Do not greet, answer, or address the user here. Do not output tool calls or JSON."
+_OPEN_TAG = "<think>"
+_CLOSE_TAG = "</think>"
+
+_THINK_TAG_INSTRUCTION = (
+    "Before responding, think step-by-step inside <think>...</think> tags. "
+    "Your thinking should be internal reasoning: what the user wants, which tools (if any) "
+    "to call, what language they are writing in, and how you will approach it. "
+    "After the closing </think> tag, write your actual response to the user. "
+    "Always reply in the same language as the user's message."
 )
 
-# ---------------------------------------------------------------------------
-# Phase B bridge: injected into the system prompt so the model knows the
-# assistant turn that follows is scratchpad, not prior output.
-# ---------------------------------------------------------------------------
-_FALLBACK_PHASE_B_BRIDGE = (
-    "The next assistant-role message is **hidden internal notes** from a reasoning step — "
-    "the user never saw it and it is not part of the conversation.  Ignore its tone and phrasing.  "
-    "Respond to the user's last message directly: call tools if needed, then write one clear reply.  "
-    "Match the language of the **user's message** (not the notes)."
-)
 
-_PLAN_WRAPPER_PREFIX = "[Internal notes — not shown to user]\n"
-_PLAN_WRAPPER_SUFFIX = "\n[End internal notes]"
+class ThinkTagParser:
+    """Streaming state machine that splits text on ``<think>``/``</think>`` boundaries.
+
+    Feed chunks of text as they arrive from the provider.  The parser yields
+    ``(role, text)`` pairs where *role* is ``"reasoning"`` (inside tags) or
+    ``"content"`` (outside tags).  Handles partial tags split across chunks.
+    """
+
+    __slots__ = ("_inside", "_buf")
+
+    def __init__(self) -> None:
+        self._inside = False
+        self._buf = ""
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        self._buf += text
+        out: list[tuple[str, str]] = []
+        while self._buf:
+            if self._inside:
+                idx = self._buf.find(_CLOSE_TAG)
+                if idx >= 0:
+                    if idx > 0:
+                        out.append(("reasoning", self._buf[:idx]))
+                    self._buf = self._buf[idx + len(_CLOSE_TAG) :]
+                    self._inside = False
+                else:
+                    safe = self._flush_safe(_CLOSE_TAG)
+                    if safe:
+                        out.append(("reasoning", safe))
+                    break
+            else:
+                idx = self._buf.find(_OPEN_TAG)
+                if idx >= 0:
+                    if idx > 0:
+                        out.append(("content", self._buf[:idx]))
+                    self._buf = self._buf[idx + len(_OPEN_TAG) :]
+                    self._inside = True
+                else:
+                    safe = self._flush_safe(_OPEN_TAG)
+                    if safe:
+                        out.append(("content", safe))
+                    break
+        return out
+
+    def flush(self) -> list[tuple[str, str]]:
+        if not self._buf:
+            return []
+        role = "reasoning" if self._inside else "content"
+        result = [(role, self._buf)]
+        self._buf = ""
+        return result
+
+    def _flush_safe(self, tag: str) -> str:
+        """Flush buffer up to the point where a partial tag might start at the end."""
+        for i in range(1, min(len(tag), len(self._buf)) + 1):
+            if tag.startswith(self._buf[-i:]):
+                safe = self._buf[: -i]
+                self._buf = self._buf[-i:]
+                return safe
+        safe = self._buf
+        self._buf = ""
+        return safe
 
 
-def _inject_planning_system(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _inject_system_suffix(
+    messages: list[dict[str, Any]],
+    suffix: str,
+) -> list[dict[str, Any]]:
+    """Append *suffix* to the first system message (or prepend a new one)."""
     out = deepcopy(messages)
     for i, m in enumerate(out):
         if m.get("role") == "system":
             c = m.get("content")
             if isinstance(c, str) and c.strip():
-                out[i] = {
-                    **m,
-                    "content": c.rstrip() + "\n\n" + _FALLBACK_PLANNING_APPENDIX,
-                }
+                out[i] = {**m, "content": c.rstrip() + "\n\n" + suffix}
                 return out
             break
-    return [{"role": "system", "content": _FALLBACK_PLANNING_APPENDIX}, *out]
+    return [{"role": "system", "content": suffix}, *out]
 
 
-def _inject_phase_b_bridge(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out = deepcopy(messages)
-    for i, m in enumerate(out):
-        if m.get("role") == "system":
-            c = m.get("content")
-            if isinstance(c, str) and c.strip():
-                out[i] = {
-                    **m,
-                    "content": c.rstrip() + "\n\n" + _FALLBACK_PHASE_B_BRIDGE,
-                }
-                return out
-            break
-    return [{"role": "system", "content": _FALLBACK_PHASE_B_BRIDGE}, *out]
-
-
-def _phase_b_events(
+def _stream_completion(
     provider: Any,
     backend: str,
     msgs: list[dict[str, Any]],
@@ -88,7 +124,6 @@ def _phase_b_events(
     max_tokens: int | None,
     kwargs: dict[str, Any],
 ) -> Iterator[AgentStreamEvent]:
-    """Tool-capable turn; forwards provider stream including ``AgentReasoningDelta``."""
     call_kw = dict(kwargs)
     call_kw["model"] = model
     if max_tokens is not None:
@@ -100,40 +135,13 @@ def _phase_b_events(
 
     if backend in ("openai", "openrouter"):
         call_kw.pop("thinking", None)
-        raw = provider.stream_chat_completion_events(msgs, **call_kw)
+        yield from provider.stream_chat_completion_events(msgs, **call_kw)
     elif backend == "anthropic":
         call_kw.pop("thinking", None)
-        raw = provider.stream_messages_events(msgs, **call_kw)
+        yield from provider.stream_messages_events(msgs, **call_kw)
     else:
         msg = f"unknown backend: {backend!r}"
         raise ValueError(msg)
-
-    yield from raw
-
-
-def _has_tool_results(messages: list[dict[str, Any]]) -> bool:
-    """True when the conversation already contains tool-result messages (post-tool round)."""
-    return any(m.get("role") == "tool" for m in messages)
-
-
-def _needs_planning(
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None,
-) -> bool:
-    """Decide whether Phase A (metacognitive planning) adds value for this round.
-
-    Skip when:
-    - No tools are provided (nothing to plan).
-    - Tool results already exist in the message history — the model already
-      called tools and just needs to answer from results.  Running a second
-      two-phase turn here doubles latency and produces duplicate content
-      (the "plan" IS the answer, then the answer streams again).
-    """
-    if not tools:
-        return False
-    if _has_tool_results(messages):
-        return False
-    return True
 
 
 def stream_agent_turn_fallback(
@@ -148,86 +156,52 @@ def stream_agent_turn_fallback(
     planning_max_tokens: int | None = None,
     **kwargs: Any,
 ) -> Iterator[AgentStreamEvent]:
-    """Phase A: silent planning completion (no tools); Phase B: tools + pass-through stream.
+    """Single completion with ``<think>`` tag parsing for reasoning/content separation.
 
-    Phase A output is **not** emitted as ``AgentReasoningDelta`` — it is only
-    injected into Phase B context.  Native reasoning from the provider in Phase B
-    is still forwarded unchanged.
+    The system prompt is augmented with a thinking-tag instruction.  Content
+    inside ``<think>...</think>`` tags is emitted as ``AgentReasoningDelta``;
+    content outside is emitted as ``AgentContentDelta``.  Tool calls flow
+    through unchanged.  Provider-native ``AgentReasoningDelta`` (e.g. from
+    a model with real extended thinking) is also forwarded.
 
     ``backend`` is ``openai``, ``openrouter`` (OpenAI-compatible), or ``anthropic``.
-
-    Phase A is **skipped** when ``tools`` is empty/``None`` or when the message
-    history already contains tool results (post-tool summary rounds).  In those
-    cases the turn falls through to a single direct completion — same latency
-    as native mode.
     """
     if backend not in ("openai", "openrouter", "anthropic"):
         msg = f"FALLBACK not implemented for backend={backend!r}"
         raise NotImplementedError(msg)
 
-    if not _needs_planning(messages, tools):
-        yield from _phase_b_events(
-            provider,
-            backend,
-            messages,
-            model=model,
-            tools=tools,
-            tool_choice=tool_choice,
-            max_tokens=max_tokens,
-            kwargs=kwargs,
-        )
-        return
+    msgs = _inject_system_suffix(messages, _THINK_TAG_INSTRUCTION)
+    parser = ThinkTagParser()
 
-    plan_cap = planning_max_tokens if planning_max_tokens is not None else min(512, max_tokens or 1024)
-    plan_msgs = _inject_planning_system(messages)
-    extra = {k: v for k, v in kwargs.items() if k not in ("tools", "tool_choice")}
-
-    if backend in ("openai", "openrouter"):
-        phase_a = provider.stream_chat_completion_events(
-            plan_msgs,
-            model=model,
-            max_tokens=plan_cap,
-            **extra,
-        )
-    else:
-        phase_a = provider.stream_messages_events(
-            plan_msgs,
-            model=model,
-            max_tokens=plan_cap,
-            **extra,
-        )
-
-    # Phase A text is internal only (tool-selection context for Phase B). Do not yield it as
-    # AgentReasoningDelta — that is regular completion output, not provider-native thinking, and
-    # surfaces duplicate / answer-shaped text in UIs that show "reasoning" lanes.
-    plan_parts: list[str] = []
-    for ev in phase_a:
-        if isinstance(ev, AgentContentDelta):
-            plan_parts.append(ev.text)
-        elif isinstance(ev, AgentReasoningDelta):
-            plan_parts.append(ev.text)
-        elif isinstance(ev, AgentToolCallDelta):
-            continue
-        elif isinstance(ev, AgentMessageFinish):
-            break
-        else:
-            yield ev
-
-    plan_text = "".join(plan_parts).strip() or "(no planning text)"
-    msgs_b = _inject_phase_b_bridge(deepcopy(messages))
-    wrapped = _PLAN_WRAPPER_PREFIX + plan_text + _PLAN_WRAPPER_SUFFIX
-    msgs_b.append({"role": "assistant", "content": wrapped})
-
-    yield from _phase_b_events(
+    for ev in _stream_completion(
         provider,
         backend,
-        msgs_b,
+        msgs,
         model=model,
         tools=tools,
         tool_choice=tool_choice,
         max_tokens=max_tokens,
         kwargs=kwargs,
-    )
+    ):
+        if isinstance(ev, AgentContentDelta):
+            for role, text in parser.feed(ev.text):
+                if role == "reasoning":
+                    yield AgentReasoningDelta(text=text)
+                else:
+                    yield AgentContentDelta(text=text)
+        elif isinstance(ev, AgentReasoningDelta):
+            yield ev
+        elif isinstance(ev, AgentToolCallDelta):
+            yield ev
+        elif isinstance(ev, AgentMessageFinish):
+            for role, text in parser.flush():
+                if role == "reasoning":
+                    yield AgentReasoningDelta(text=text)
+                else:
+                    yield AgentContentDelta(text=text)
+            yield ev
+        else:
+            yield ev
 
 
-__all__ = ["stream_agent_turn_fallback", "_inject_planning_system"]
+__all__ = ["stream_agent_turn_fallback", "ThinkTagParser"]

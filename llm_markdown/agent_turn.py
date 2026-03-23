@@ -7,8 +7,12 @@ from typing import Any
 
 from llm_markdown.agent_fallback import stream_agent_turn_fallback
 from llm_markdown.agent_stream import (
+    AgentContentDelta,
+    AgentMessageFinish,
     AgentReasoningDelta,
+    AgentSegmentStart,
     AgentStreamEvent,
+    AgentToolCallDelta,
 )
 from llm_markdown.reasoning import BackendName, ReasoningConfig, ReasoningMode
 
@@ -18,6 +22,42 @@ def _filter_reasoning_off(events: Iterator[AgentStreamEvent]) -> Iterator[AgentS
         if isinstance(ev, AgentReasoningDelta):
             continue
         yield ev
+
+
+def _is_agentic_turn(tools: list[dict[str, Any]] | None) -> bool:
+    return bool(tools)
+
+
+def _apply_agentic_segment_markers(
+    events: Iterator[AgentStreamEvent],
+    *,
+    agentic: bool,
+) -> Iterator[AgentStreamEvent]:
+    """Insert :class:`AgentSegmentStart` for non-empty ``tools`` turns.
+
+    Opens with ``reasoning``; first :class:`AgentContentDelta` or
+    :class:`AgentToolCallDelta` is preceded by ``content``. Reasoning deltas
+    stay in the reasoning segment until that transition.
+    """
+    if not agentic:
+        yield from events
+        return
+    yield AgentSegmentStart(segment="reasoning")
+    lane: str = "reasoning"
+    for ev in events:
+        if isinstance(ev, AgentReasoningDelta):
+            yield ev
+        elif isinstance(ev, (AgentContentDelta, AgentToolCallDelta)):
+            if lane == "reasoning":
+                yield AgentSegmentStart(segment="content")
+                lane = "content"
+            yield ev
+        elif isinstance(ev, AgentMessageFinish):
+            yield ev
+        elif isinstance(ev, AgentSegmentStart):
+            yield ev
+        else:
+            yield ev
 
 
 def stream_agent_turn(
@@ -52,6 +92,10 @@ def stream_agent_turn(
     - ``fallback`` — two-phase planning (no tools) as ``AgentReasoningDelta``, then tools
       (:mod:`llm_markdown.agent_fallback`).
 
+    **Agentic segment contract:** when ``tools`` is non-empty, the stream includes
+    :class:`~llm_markdown.agent_stream.AgentSegmentStart` markers so consumers can
+    treat the first segment as reasoning without inferring from the first delta type.
+
     Raises:
         ValueError: if :meth:`ReasoningConfig.validate_for_backend` fails or backend is ``gemini``.
         NotImplementedError: from :func:`~llm_markdown.agent_fallback.stream_agent_turn_fallback`
@@ -61,17 +105,22 @@ def stream_agent_turn(
     rc = reasoning or ReasoningConfig.native()
     rc.validate_for_backend(backend)
 
+    agentic = _is_agentic_turn(tools)
+
     if rc.mode is ReasoningMode.FALLBACK:
-        yield from stream_agent_turn_fallback(
-            provider,
-            backend,
-            messages,
-            model=model,
-            tools=tools,
-            tool_choice=tool_choice,
-            max_tokens=max_tokens,
-            planning_max_tokens=planning_max_tokens,
-            **kwargs,
+        yield from _apply_agentic_segment_markers(
+            stream_agent_turn_fallback(
+                provider,
+                backend,
+                messages,
+                model=model,
+                tools=tools,
+                tool_choice=tool_choice,
+                max_tokens=max_tokens,
+                planning_max_tokens=planning_max_tokens,
+                **kwargs,
+            ),
+            agentic=agentic,
         )
         return
 
@@ -99,9 +148,12 @@ def stream_agent_turn(
         raise ValueError(msg)
 
     if rc.mode is ReasoningMode.OFF:
-        yield from _filter_reasoning_off(raw)
+        yield from _apply_agentic_segment_markers(
+            _filter_reasoning_off(raw),
+            agentic=agentic,
+        )
         return
-    yield from raw
+    yield from _apply_agentic_segment_markers(raw, agentic=agentic)
 
 
 __all__ = ["stream_agent_turn"]

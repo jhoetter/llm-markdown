@@ -34,6 +34,7 @@ from llm_markdown.agent_stream import (
     AgentContentDelta,
     AgentMessageFinish,
     AgentReasoningDelta,
+    AgentSegmentStart,
     AgentToolCallDelta,
 )
 from llm_markdown.agent_turn import stream_agent_turn
@@ -196,7 +197,9 @@ def main() -> None:
             tool_choice="auto",
             reasoning=rc,
         ):
-            if isinstance(ev, AgentContentDelta):
+            if isinstance(ev, AgentSegmentStart):
+                print(f"  segment_start: {ev.segment!r}")
+            elif isinstance(ev, AgentContentDelta):
                 assistant_text += ev.text
                 n_content += 1
                 print(f"  content_delta: {ev.text!r}")

@@ -48,7 +48,7 @@ def _phase_b_events(
     max_tokens: int | None,
     kwargs: dict[str, Any],
 ) -> Iterator[AgentStreamEvent]:
-    """Tool turn with reasoning stripped (same as ReasoningConfig.off)."""
+    """Tool-capable turn; forwards provider stream including ``AgentReasoningDelta``."""
     call_kw = dict(kwargs)
     call_kw["model"] = model
     if max_tokens is not None:
@@ -68,10 +68,7 @@ def _phase_b_events(
         msg = f"unknown backend: {backend!r}"
         raise ValueError(msg)
 
-    for ev in raw:
-        if isinstance(ev, AgentReasoningDelta):
-            continue
-        yield ev
+    yield from raw
 
 
 def stream_agent_turn_fallback(
@@ -86,7 +83,7 @@ def stream_agent_turn_fallback(
     planning_max_tokens: int | None = None,
     **kwargs: Any,
 ) -> Iterator[AgentStreamEvent]:
-    """Phase A: planning stream (no tools) → ``AgentReasoningDelta``; Phase B: tools, reasoning filtered out.
+    """Phase A: planning stream (no tools) → ``AgentReasoningDelta``; Phase B: tools + pass-through stream.
 
     ``backend`` is ``openai``, ``openrouter`` (OpenAI-compatible), or ``anthropic``.
     """

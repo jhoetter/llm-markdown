@@ -1,6 +1,18 @@
 # Agent streaming (tools + reasoning)
 
-Hof-style agents consume a single stream of normalized events from **llm-markdown** (`AgentContentDelta`, `AgentReasoningDelta`, `AgentToolCallDelta`, `AgentMessageFinish`). Use [`stream_agent_turn()`](../llm_markdown/agent_turn.py) so **reasoning** is configured in one place (native vs off vs fallback), similar to structured output (native tool schema vs JSON-in-text fallback).
+Hof-style agents consume a single stream of normalized events from **llm-markdown** (`AgentContentDelta`, `AgentReasoningDelta`, `AgentToolCallDelta`, `AgentMessageFinish`, and **`AgentSegmentStart`** for agentic turns). Use [`stream_agent_turn()`](../llm_markdown/agent_turn.py) so **reasoning** is configured in one place (native vs off vs fallback), similar to structured output (native tool schema vs JSON-in-text fallback).
+
+## Agentic segment contract (`tools` non-empty)
+
+When `stream_agent_turn(..., tools=[...])` is used with a non-empty tool list, the library emits **`AgentSegmentStart`** markers:
+
+1. **`AgentSegmentStart(segment="reasoning")`** is always **first** — consumers can open the “thinking” lane without inferring from the first delta type.
+2. **`AgentReasoningDelta`** events belong to that reasoning segment until the first assistant-visible **content** or **tool** delta.
+3. **`AgentSegmentStart(segment="content")`** is emitted immediately **before** the first `AgentContentDelta` or `AgentToolCallDelta`.
+
+Turns **without** tools do **not** emit `AgentSegmentStart` (non-agentic chat completion).
+
+**FALLBACK** still uses two provider calls; segment markers wrap the **combined** iterator so reasoning in phase B (if the API emits it) stays in the reasoning segment until content or tools appear.
 
 ## Capability matrix (by provider)
 
@@ -17,7 +29,7 @@ Prefer **native** API reasoning whenever the model and endpoint support it. Use 
 
 - **NATIVE:** one provider call with tools; emit only what the API provides (`AgentReasoningDelta`, content, tools). No synthetic reasoning text.
 - **OFF:** do not merge `openai_extras` / Anthropic `thinking`; strip `AgentReasoningDelta` from the stream.
-- **FALLBACK:** provider-agnostic **two-phase** turn implemented in [`agent_fallback.py`](../llm_markdown/agent_fallback.py): phase A streams **without tools** (planning instruction appended to the system prompt); assistant text and native thinking deltas are re-emitted as **`AgentReasoningDelta`**. Phase B appends the plan as an assistant message and runs **one tool-capable** turn with reasoning stripped (same effect as **OFF**). Not supported for **`gemini`** (use `openai`, `openrouter`, or `anthropic`).
+- **FALLBACK:** provider-agnostic **two-phase** turn implemented in [`agent_fallback.py`](../llm_markdown/agent_fallback.py): phase A streams **without tools** (planning instruction appended to the system prompt); assistant text and native thinking deltas are re-emitted as **`AgentReasoningDelta`**. Phase B appends the plan as an assistant message and runs **one tool-capable** turn; provider **`AgentReasoningDelta`** events are **forwarded** (not stripped). Not supported for **`gemini`** (use `openai`, `openrouter`, or `anthropic`).
 
 ## When `AgentReasoningDelta` appears
 

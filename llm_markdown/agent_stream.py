@@ -46,11 +46,27 @@ class AgentMessageFinish:
     kind: Literal["message_finish"] = "message_finish"
 
 
+@dataclass(frozen=True, slots=True)
+class AgentSegmentStart:
+    """Start of a **reasoning** or **content** segment in an agentic turn.
+
+    Emitted by :func:`~llm_markdown.agent_turn.stream_agent_turn` when ``tools``
+    is non-empty. The stream always begins with ``segment="reasoning"``; the
+    first :class:`AgentContentDelta` or :class:`AgentToolCallDelta` is preceded
+    by ``segment="content"``. :class:`AgentReasoningDelta` events belong to the
+    reasoning segment until that transition (including across FALLBACK phase A→B).
+    """
+
+    segment: Literal["reasoning", "content"]
+    kind: Literal["segment_start"] = "segment_start"
+
+
 AgentStreamEvent = Union[
     AgentContentDelta,
     AgentReasoningDelta,
     AgentToolCallDelta,
     AgentMessageFinish,
+    AgentSegmentStart,
 ]
 
 
@@ -80,6 +96,7 @@ __all__ = [
     "AgentReasoningDelta",
     "AgentToolCallDelta",
     "AgentMessageFinish",
+    "AgentSegmentStart",
     "AgentStreamEvent",
     "openai_chat_tools_to_anthropic",
 ]

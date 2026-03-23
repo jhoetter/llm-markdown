@@ -58,7 +58,7 @@ In the GitHub repo **Settings → Environments**, create an environment named **
 
 ### Downstream: hof-engine lockfile
 
-**hof-engine** depends on **`llm-markdown[openai]>=0.3.6`** from PyPI (agent streaming + `ReasoningMode.fallback`). After **this** package version is published and visible on [pypi.org/project/llm-markdown](https://pypi.org/project/llm-markdown/), refresh the engine lockfile:
+**hof-engine** depends on **`llm-markdown[openai]>=0.3.7`** from PyPI (agent streaming, `AgentSegmentStart`, `ReasoningMode.fallback`). After **this** package version is published and visible on [pypi.org/project/llm-markdown](https://pypi.org/project/llm-markdown/), refresh the engine lockfile (and remove any temporary `[tool.uv.sources]` path override in hof-engine `pyproject.toml` if you used one for pre-release locking):
 
 ```bash
 cd /path/to/hof-engine

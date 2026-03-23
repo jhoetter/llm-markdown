@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.7
+
+### Added
+
+- **`AgentSegmentStart`** — `segment="reasoning" | "content"` markers for **agentic** turns (`tools` non-empty) from **`stream_agent_turn`**: stream always opens in the reasoning segment; first `AgentContentDelta` or `AgentToolCallDelta` is preceded by `segment="content"`.
+
+### Changed
+
+- **FALLBACK** phase B forwards **`AgentReasoningDelta`** from the provider (no longer stripped) so tool rounds can interleave reasoning like native mode.
+
+### Notes
+
+- Publish by tagging **`v0.3.7`** (must match `setup.py` / `llm_markdown.__version__`) and running the **Publish to PyPI** workflow (`docs/versioning.md`).
+
 ## 0.3.6
 
 ### Added

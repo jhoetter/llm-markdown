@@ -11,6 +11,7 @@ from llm_markdown.agent_stream import (
     AgentContentDelta,
     AgentMessageFinish,
     AgentReasoningDelta,
+    AgentSegmentStart,
     AgentToolCallDelta,
 )
 from llm_markdown.agent_turn import stream_agent_turn
@@ -81,9 +82,14 @@ def test_fallback_openai_two_phase_reasoning_before_tool():
             reasoning=ReasoningConfig(mode=ReasoningMode.FALLBACK),
         )
     )
+    assert isinstance(events[0], AgentSegmentStart)
+    assert events[0].segment == "reasoning"
     idx_reasoning = next(i for i, e in enumerate(events) if isinstance(e, AgentReasoningDelta))
     idx_tool = next(i for i, e in enumerate(events) if isinstance(e, AgentToolCallDelta))
-    assert idx_reasoning < idx_tool
+    idx_content_seg = next(
+        i for i, e in enumerate(events) if isinstance(e, AgentSegmentStart) and e.segment == "content"
+    )
+    assert idx_reasoning < idx_content_seg < idx_tool
     assert provider.stream_chat_completion_events.call_count == 2
 
 
@@ -127,10 +133,111 @@ def test_fallback_anthropic_two_phase_reasoning_before_tool():
             reasoning=ReasoningConfig(mode=ReasoningMode.FALLBACK),
         )
     )
+    assert isinstance(events[0], AgentSegmentStart)
+    assert events[0].segment == "reasoning"
     idx_reasoning = next(i for i, e in enumerate(events) if isinstance(e, AgentReasoningDelta))
     idx_tool = next(i for i, e in enumerate(events) if isinstance(e, AgentToolCallDelta))
-    assert idx_reasoning < idx_tool
+    idx_content_seg = next(
+        i for i, e in enumerate(events) if isinstance(e, AgentSegmentStart) and e.segment == "content"
+    )
+    assert idx_reasoning < idx_content_seg < idx_tool
     assert provider.stream_messages_events.call_count == 2
+
+
+def test_fallback_phase_b_forwards_reasoning_before_tool():
+    """Phase B passes through provider-native reasoning deltas before tool calls."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "add",
+                "description": "Add numbers",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+                    "required": ["a", "b"],
+                },
+            },
+        }
+    ]
+    phase_a = iter(
+        [
+            AgentContentDelta(text="plan"),
+            AgentMessageFinish(finish_reason="stop", usage=None),
+        ]
+    )
+    phase_b = iter(
+        [
+            AgentReasoningDelta(text="wire think"),
+            AgentToolCallDelta(index=0, tool_call_id="t1", name="add", arguments="{}"),
+            AgentMessageFinish(finish_reason="tool_calls", usage=None),
+        ]
+    )
+    provider = MagicMock()
+    provider.stream_chat_completion_events.side_effect = [phase_a, phase_b]
+
+    events = list(
+        stream_agent_turn(
+            provider,
+            "openai",
+            [{"role": "user", "content": "x"}],
+            model="gpt-4o-mini",
+            tools=tools,
+            reasoning=ReasoningConfig(mode=ReasoningMode.FALLBACK),
+        )
+    )
+    rb = next(i for i, e in enumerate(events) if isinstance(e, AgentReasoningDelta) and e.text == "wire think")
+    tb = next(i for i, e in enumerate(events) if isinstance(e, AgentToolCallDelta))
+    assert rb < tb
+
+
+def test_agentic_opens_reasoning_segment_before_content_when_no_reasoning_delta():
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "x", "description": "x", "parameters": {"type": "object", "properties": {}}},
+        }
+    ]
+    inner = iter(
+        [
+            AgentContentDelta(text="hello"),
+            AgentMessageFinish(finish_reason="stop", usage=None),
+        ]
+    )
+    provider = MagicMock()
+    provider.stream_chat_completion_events.return_value = inner
+
+    events = list(
+        stream_agent_turn(
+            provider,
+            "openai",
+            [{"role": "user", "content": "z"}],
+            model="gpt-4o-mini",
+            tools=tools,
+            reasoning=ReasoningConfig.native(),
+        )
+    )
+    assert isinstance(events[0], AgentSegmentStart) and events[0].segment == "reasoning"
+    assert isinstance(events[1], AgentSegmentStart) and events[1].segment == "content"
+    assert isinstance(events[2], AgentContentDelta)
+
+
+def test_non_agentic_turn_has_no_segment_markers():
+    inner = iter([AgentContentDelta(text="a"), AgentMessageFinish(finish_reason="stop", usage=None)])
+    provider = MagicMock()
+    provider.stream_chat_completion_events.return_value = inner
+
+    events = list(
+        stream_agent_turn(
+            provider,
+            "openai",
+            [{"role": "user", "content": "z"}],
+            model="gpt-4o-mini",
+            tools=None,
+            reasoning=ReasoningConfig.native(),
+        )
+    )
+    assert not any(isinstance(e, AgentSegmentStart) for e in events)
 
 
 def test_gemini_backend_raises():

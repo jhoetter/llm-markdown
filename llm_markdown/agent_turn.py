@@ -90,10 +90,12 @@ def stream_agent_turn(
     - ``native`` — forward provider-native reasoning/thinking when the API emits it.
     - ``off`` — filter out ``AgentReasoningDelta``; do not request Anthropic extended thinking.
     - ``fallback`` — hybrid in :mod:`llm_markdown.agent_fallback`: tool-selection rounds
-      run Phase A (no tools; all streamed text as ``AgentReasoningDelta``) then Phase B
-      (tools; pass-through).  Answer rounds use one completion with think-tag parsing
-      (inside ``</think>...`` → ``AgentReasoningDelta``, outside → ``AgentContentDelta``).
-      Provider-native reasoning is forwarded where emitted.
+      run Phase A (no tools; short analytical notes, all streamed as ``AgentReasoningDelta``)
+      then Phase B with tools and ``<think>...</think>`` think-tag parsing on streamed assistant text.
+      Answer rounds use one completion with the same tag parsing
+      (inside the tags → ``AgentReasoningDelta``, outside → ``AgentContentDelta``).
+      Provider-native reasoning is forwarded unchanged.
+
 
     **Agentic segment contract:** when ``tools`` is non-empty, the stream includes
     :class:`~llm_markdown.agent_stream.AgentSegmentStart` markers so consumers can

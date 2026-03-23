@@ -169,7 +169,7 @@ _SIMPLE_TOOLS = [
 
 
 def test_fallback_openai_hybrid_tool_round_two_calls():
-    """Tool round: Phase A streams all text as reasoning; Phase B pass-through (content + tool)."""
+    """Tool round: Phase A streams all text as reasoning; Phase B think-tag split (content + tool)."""
     phase_a = iter([
         AgentContentDelta(text="The user wants addition; I will call add."),
         AgentMessageFinish(finish_reason="stop", usage=None),
@@ -198,6 +198,10 @@ def test_fallback_openai_hybrid_tool_round_two_calls():
     assert any("Calling the tool" in e.text for e in content)
     assert len(tools) == 1
     assert provider.stream_chat_completion_events.call_count == 2
+    msgs_a = provider.stream_chat_completion_events.call_args_list[0][0][0]
+    sys_a = next(m for m in msgs_a if m.get("role") == "system")
+    assert "Do NOT write a response" in sys_a["content"]
+    assert "analytical notes" in sys_a["content"].lower()
 
 
 def test_fallback_anthropic_hybrid_tool_round_two_calls():
@@ -318,7 +322,8 @@ def test_fallback_think_instruction_injected_into_system():
     sys_content = next(m["content"] for m in called_msgs if m["role"] == "system")
     assert "Be helpful." in sys_content
     assert "<think>" in sys_content
-    assert "reasoning" in sys_content.lower()
+    assert "NEVER draft" in sys_content
+    assert "private reasoning" in sys_content.lower()
 
 
 def test_fallback_think_instruction_added_when_no_system():
@@ -397,6 +402,7 @@ def test_fallback_phase_b_bridge_and_wrapped_plan():
     sys0 = next(m for m in msgs_b if m.get("role") == "system")
     assert "internal notes" in sys0["content"].lower()
     assert "language" in sys0["content"].lower()
+    assert "NEVER draft" in sys0["content"]
     plan_msg = msgs_b[-1]
     assert plan_msg["role"] == "assistant"
     assert plan_msg["content"].startswith("[Internal notes")

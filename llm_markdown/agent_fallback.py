@@ -2,10 +2,11 @@
 
 **Tool-selection rounds** (non-empty ``tools`` and no ``tool`` messages in history):
 two provider calls. Phase A has no tools, so the model must emit text; that
-stream is parsed with :class:`ThinkTagParser` but **every** text chunk is
-emitted as :class:`~llm_markdown.agent_stream.AgentReasoningDelta` (all internal).
+emits :class:`~llm_markdown.agent_stream.AgentReasoningDelta` only (no think-tag
+split; instruction elicits short analytical notes, not a user-facing reply).
 The raw completion is injected into Phase B as hidden notes, then Phase B runs
-with tools and is a **pass-through** stream (no tag parsing).
+with tools and parsed through :class:`ThinkTagParser` (think tags in content
+split into reasoning vs reply; tool deltas unchanged).
 
 **Answer rounds** (no tools, or tool results already in history): a single
 completion with a thinking-tag instruction; the parser splits streamed text so
@@ -30,11 +31,26 @@ from llm_markdown.agent_stream import (
 _OPEN_TAG = "<think>"
 _CLOSE_TAG = "</think>"
 
+_PHASE_A_INSTRUCTION = (
+    "[Internal reasoning step — output is never shown to the user]\n"
+    "Briefly analyze the request: what does the user want, which tools "
+    "(if any) should you call, what language are they using, and your "
+    "approach in one sentence.\n"
+    "Do NOT write a response to the user. Do NOT greet or address them. "
+    "Only write short analytical notes."
+)
+
 _THINK_TAG_INSTRUCTION = (
-    "Before responding, think step-by-step inside <think>...</think> tags. "
-    "Your thinking should be internal reasoning: what the user wants, which tools (if any) "
-    "to call, what language they are writing in, and how you will approach it. "
-    "After the closing </think> tag, write your actual response to the user. "
+    "You have a private reasoning step. Before responding, write brief "
+    f"analytical notes inside {_OPEN_TAG}...{_CLOSE_TAG} tags.\n\n"
+    "RULES:\n"
+    f"- After {_OPEN_TAG} and before {_CLOSE_TAG}: ONLY your analytical process — what the user wants, "
+    "observations about data, your plan. 1-3 sentences.\n"
+    f"- After {_OPEN_TAG} and before {_CLOSE_TAG}: NEVER draft, preview, or include any part of your "
+    "response. No tables, lists, code, or formatted output.\n"
+    f"- The text between {_OPEN_TAG} and {_CLOSE_TAG} and your response after {_CLOSE_TAG} must be "
+    "fundamentally different content.\n\n"
+    f"After {_CLOSE_TAG}, write your complete response to the user.\n"
     "Always reply in the same language as the user's message."
 )
 
@@ -228,8 +244,8 @@ def _stream_phase_a_all_reasoning(
     kwargs: dict[str, Any],
     plan_parts: list[str],
 ) -> Iterator[AgentStreamEvent]:
-    """No-tools completion; every content chunk is emitted as ``AgentReasoningDelta``."""
-    msgs = _inject_system_suffix(messages, _THINK_TAG_INSTRUCTION)
+    """No-tools completion; every text chunk is emitted as ``AgentReasoningDelta``."""
+    msgs = _inject_system_suffix(messages, _PHASE_A_INSTRUCTION)
     extra = {k: v for k, v in kwargs.items() if k not in ("tools", "tool_choice")}
     stream = _stream_completion(
         provider,
@@ -241,20 +257,14 @@ def _stream_phase_a_all_reasoning(
         max_tokens=plan_cap,
         kwargs=extra,
     )
-    parser = ThinkTagParser()
     for ev in stream:
         if isinstance(ev, AgentContentDelta):
             plan_parts.append(ev.text)
-            for _role, chunk in parser.feed(ev.text):
-                if chunk:
-                    yield AgentReasoningDelta(text=chunk)
+            yield AgentReasoningDelta(text=ev.text)
         elif isinstance(ev, AgentReasoningDelta):
             plan_parts.append(ev.text)
             yield ev
         elif isinstance(ev, AgentMessageFinish):
-            for _role, chunk in parser.flush():
-                if chunk:
-                    yield AgentReasoningDelta(text=chunk)
             break
         else:
             yield ev
@@ -310,18 +320,21 @@ def stream_agent_turn_fallback(
 
     plan_text = "".join(plan_parts).strip() or "(no planning text)"
     msgs_b = _inject_phase_b_bridge(deepcopy(messages))
+    msgs_b = _inject_system_suffix(msgs_b, _THINK_TAG_INSTRUCTION)
     wrapped = _PLAN_WRAPPER_PREFIX + plan_text + _PLAN_WRAPPER_SUFFIX
     msgs_b.append({"role": "assistant", "content": wrapped})
 
-    yield from _stream_completion(
-        provider,
-        backend,
-        msgs_b,
-        model=model,
-        tools=tools,
-        tool_choice=tool_choice,
-        max_tokens=max_tokens,
-        kwargs=kwargs,
+    yield from _yield_think_tag_split_stream(
+        _stream_completion(
+            provider,
+            backend,
+            msgs_b,
+            model=model,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens,
+            kwargs=kwargs,
+        )
     )
 
 

@@ -30,6 +30,10 @@ The workflow [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)
 - `environment: pypi`
 - `pypa/gh-action-pypi-publish@release/v1`
 
+### Owner must match GitHub exactly
+
+The **Owner** field is the GitHub **username or organization** that owns the repo (as in `https://github.com/OWNER/llm-markdown`). It must match **character-for-character**. A mismatch (e.g. `jthoetter` vs `jhoetter`) will cause OIDC publish failures with no obvious PyPI error in the UI.
+
 ### One-time: register the publisher on PyPI
 
 In [PyPI → Account settings → Publishing](https://pypi.org/manage/account/publishing/) (trusted publishers):

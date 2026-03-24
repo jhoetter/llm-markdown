@@ -261,6 +261,7 @@ class AnthropicProvider(LLMProvider):
         system, anthropic_messages = self._to_anthropic_messages(messages)
         stream_kw = dict(kwargs)
         stream_kw.pop("stream", None)
+        should_cancel = stream_kw.pop("should_cancel", None)
         tools = stream_kw.pop("tools", None)
         tool_choice = stream_kw.pop("tool_choice", None)
         model = stream_kw.pop("model", self.model)
@@ -294,8 +295,12 @@ class AnthropicProvider(LLMProvider):
             started = time.perf_counter()
             active_tool_idx: int | None = None
             saw_message_stop = False
+            user_cancelled = False
             with self._call_with_retries(_create_stream) as stream:
                 for chunk in stream:
+                    if should_cancel and should_cancel():
+                        user_cancelled = True
+                        break
                     t = getattr(chunk, "type", None)
                     if t == "text":
                         yield AgentContentDelta(text=chunk.text)
@@ -350,6 +355,21 @@ class AnthropicProvider(LLMProvider):
                             usage=usage_dict,
                         )
                         saw_message_stop = True
+
+                if user_cancelled:
+                    self._last_response_metadata = {
+                        "provider": type(self).__name__,
+                        "model": model,
+                        "response_id": None,
+                        "usage": self._last_usage,
+                        "latency_ms": int((time.perf_counter() - started) * 1000),
+                        "retry_attempts": self._last_retry_attempts,
+                    }
+                    yield AgentMessageFinish(
+                        finish_reason="cancelled",
+                        usage=self._last_usage,
+                    )
+                    return
 
                 final = stream.get_final_message()
                 self._set_usage(getattr(final, "usage", None))

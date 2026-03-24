@@ -18,7 +18,7 @@ segments outside become ``AgentContentDelta``.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from copy import deepcopy
 from typing import Any
 
@@ -214,10 +214,14 @@ def _stream_completion(
 
 def _yield_think_tag_split_stream(
     events: Iterator[AgentStreamEvent],
+    should_cancel: Callable[[], bool] | None = None,
 ) -> Iterator[AgentStreamEvent]:
     """Map content through :class:`ThinkTagParser`; reasoning vs content by tag position."""
     parser = ThinkTagParser()
     for ev in events:
+        if should_cancel and should_cancel():
+            yield AgentMessageFinish(finish_reason="cancelled", usage=None)
+            return
         if isinstance(ev, AgentContentDelta):
             for role, text in parser.feed(ev.text):
                 if role == "reasoning":
@@ -248,10 +252,13 @@ def _stream_phase_a_all_reasoning(
     plan_cap: int,
     kwargs: dict[str, Any],
     plan_parts: list[str],
+    should_cancel: Callable[[], bool] | None = None,
 ) -> Iterator[AgentStreamEvent]:
     """No-tools completion; every text chunk is emitted as ``AgentReasoningDelta``."""
     msgs = _inject_system_suffix(messages, _PHASE_A_INSTRUCTION)
     extra = {k: v for k, v in kwargs.items() if k not in ("tools", "tool_choice")}
+    if should_cancel is not None:
+        extra["should_cancel"] = should_cancel
     stream = _stream_completion(
         provider,
         backend,
@@ -263,6 +270,9 @@ def _stream_phase_a_all_reasoning(
         kwargs=extra,
     )
     for ev in stream:
+        if should_cancel and should_cancel():
+            yield AgentMessageFinish(finish_reason="cancelled", usage=None)
+            return
         if isinstance(ev, AgentContentDelta):
             plan_parts.append(ev.text)
             yield AgentReasoningDelta(text=ev.text)
@@ -285,6 +295,7 @@ def stream_agent_turn_fallback(
     tool_choice: str | dict[str, Any] | None = "auto",
     max_tokens: int | None = None,
     planning_max_tokens: int | None = None,
+    should_cancel: Callable[[], bool] | None = None,
     **kwargs: Any,
 ) -> Iterator[AgentStreamEvent]:
     """Hybrid FALLBACK: two-phase for tool selection, think-tags for answer rounds.
@@ -297,6 +308,9 @@ def stream_agent_turn_fallback(
 
     if not _needs_planning(messages, tools):
         msgs = _inject_system_suffix(messages, _THINK_TAG_INSTRUCTION)
+        fb_kw = dict(kwargs)
+        if should_cancel is not None:
+            fb_kw["should_cancel"] = should_cancel
         yield from _yield_think_tag_split_stream(
             _stream_completion(
                 provider,
@@ -306,8 +320,9 @@ def stream_agent_turn_fallback(
                 tools=tools,
                 tool_choice=tool_choice,
                 max_tokens=max_tokens,
-                kwargs=kwargs,
-            )
+                kwargs=fb_kw,
+            ),
+            should_cancel=should_cancel,
         )
         return
 
@@ -321,7 +336,12 @@ def stream_agent_turn_fallback(
         plan_cap=plan_cap,
         kwargs=kwargs,
         plan_parts=plan_parts,
+        should_cancel=should_cancel,
     )
+
+    if should_cancel and should_cancel():
+        yield AgentMessageFinish(finish_reason="cancelled", usage=None)
+        return
 
     plan_text = "".join(plan_parts).strip() or "(no planning text)"
     msgs_b = _inject_phase_b_bridge(deepcopy(messages))
@@ -334,6 +354,9 @@ def stream_agent_turn_fallback(
     else:
         msgs_b.append({"role": "assistant", "content": wrapped})
 
+    fb_kw_b = dict(kwargs)
+    if should_cancel is not None:
+        fb_kw_b["should_cancel"] = should_cancel
     yield from _yield_think_tag_split_stream(
         _stream_completion(
             provider,
@@ -343,8 +366,9 @@ def stream_agent_turn_fallback(
             tools=tools,
             tool_choice=tool_choice,
             max_tokens=max_tokens,
-            kwargs=kwargs,
-        )
+            kwargs=fb_kw_b,
+        ),
+        should_cancel=should_cancel,
     )
 
 

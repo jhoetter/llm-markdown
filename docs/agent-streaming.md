@@ -84,6 +84,12 @@ Unit tests (mocked, no network):
 pytest tests/test_agent_turn.py -q
 ```
 
+## Cooperative cancellation (`should_cancel`)
+
+Pass **`should_cancel: Callable[[], bool] | None`** to **`stream_agent_turn`** (and **`stream_agent_turn_fallback`** receives it the same way). When it returns **`True`**, the in-flight provider stream is stopped as soon as possible: **OpenAI**-compatible streams call **`.close()`** on the SDK stream; **Anthropic** exits the **`messages.stream`** context early. The turn ends with **`AgentMessageFinish(finish_reason="cancelled")`**.
+
+[Hof-engine](https://github.com/jhoetter/hof-engine) binds a per-request cancel event (HTTP disconnect or client **Stop**) and passes **`should_cancel`** from the agent NDJSON stream layer.
+
 ## hof-engine
 
 [Hof](https://github.com/jhoetter/hof-engine) can set **`agent_reasoning_mode=fallback`** (or **`AGENT_REASONING_MODE=fallback`**) so the agent loop uses llm-markdown **FALLBACK** for OpenAI-backed runs.

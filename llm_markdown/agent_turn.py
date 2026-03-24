@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from llm_markdown.agent_fallback import stream_agent_turn_fallback
@@ -71,9 +71,14 @@ def stream_agent_turn(
     max_tokens: int | None = None,
     reasoning: ReasoningConfig | None = None,
     planning_max_tokens: int | None = None,
+    should_cancel: Callable[[], bool] | None = None,
     **kwargs: Any,
 ) -> Iterator[AgentStreamEvent]:
     """Stream one tool-capable model turn as :class:`~llm_markdown.agent_stream.AgentStreamEvent`.
+
+    ``should_cancel``: if set, called frequently while streaming; when it returns True the
+    turn ends with ``AgentMessageFinish(finish_reason="cancelled")`` and provider streams are
+    closed where supported.
 
     Dispatches to:
 
@@ -89,13 +94,10 @@ def stream_agent_turn(
 
     - ``native`` — forward provider-native reasoning/thinking when the API emits it.
     - ``off`` — filter out ``AgentReasoningDelta``; do not request Anthropic extended thinking.
-    - ``fallback`` — hybrid in :mod:`llm_markdown.agent_fallback`: tool-selection rounds
-      run Phase A (no tools; short analytical notes, all streamed as ``AgentReasoningDelta``)
-      then Phase B with tools and ``<think>...</think>`` think-tag parsing on streamed assistant text.
-      Answer rounds use one completion with the same tag parsing
-      (inside the tags → ``AgentReasoningDelta``, outside → ``AgentContentDelta``).
+    - ``fallback`` — single completion with ``<think>`` tag parsing
+      (:mod:`llm_markdown.agent_fallback`).  Content inside ``<think>...</think>``
+      is streamed as ``AgentReasoningDelta``; content outside as ``AgentContentDelta``.
       Provider-native reasoning is forwarded unchanged.
-
 
     **Agentic segment contract:** when ``tools`` is non-empty, the stream includes
     :class:`~llm_markdown.agent_stream.AgentSegmentStart` markers so consumers can
@@ -123,6 +125,7 @@ def stream_agent_turn(
                 tool_choice=tool_choice,
                 max_tokens=max_tokens,
                 planning_max_tokens=planning_max_tokens,
+                should_cancel=should_cancel,
                 **kwargs,
             ),
             agentic=agentic,
@@ -137,6 +140,8 @@ def stream_agent_turn(
         call_kw["tools"] = tools
     if tool_choice is not None:
         call_kw["tool_choice"] = tool_choice
+    if should_cancel is not None:
+        call_kw["should_cancel"] = should_cancel
 
     if backend in ("openai", "openrouter"):
         if rc.mode is ReasoningMode.NATIVE and rc.openai_extras:

@@ -226,6 +226,7 @@ class OpenAIProvider(LLMProvider):
         started = time.perf_counter()
         kw = dict(kwargs)
         kw.pop("stream", None)
+        should_cancel = kw.pop("should_cancel", None)
         model = kw.pop("model", self.model)
         request_kwargs = self._request_options(kw)
 
@@ -252,64 +253,79 @@ class OpenAIProvider(LLMProvider):
             last_choice_chunk: object | None = None
             last_usage: dict | None = None
             last_seen_finish_reason: str | None = None
-            for chunk in stream:
-                last_chunk = chunk
-                u = _extract_chunk_usage(chunk)
-                if u:
-                    last_usage = u
-                if not chunk.choices:
-                    continue
-                last_choice_chunk = chunk
-                ch0 = chunk.choices[0]
-                fr_chunk = getattr(ch0, "finish_reason", None)
-                if fr_chunk:
-                    last_seen_finish_reason = fr_chunk
-                delta = ch0.delta
-                frag = _delta_content_text(delta)
-                if frag:
-                    yield AgentContentDelta(text=frag)
-                rtext = _delta_reasoning_text(delta)
-                if rtext:
-                    yield AgentReasoningDelta(text=rtext)
-                tcd = getattr(delta, "tool_calls", None)
-                if tcd:
-                    for tc in tcd:
-                        idx = int(tc.index)
-                        tid = getattr(tc, "id", None) or None
-                        fn = getattr(tc, "function", None)
-                        nm = None
-                        arg_frag = None
-                        if fn is not None:
-                            nm = getattr(fn, "name", None) or None
-                            if not nm:
-                                nm = None
-                            a = getattr(fn, "arguments", None) or None
-                            if a:
-                                arg_frag = a if isinstance(a, str) else str(a)
-                        yield AgentToolCallDelta(
-                            index=idx,
-                            tool_call_id=tid,
-                            name=nm,
-                            arguments=arg_frag,
-                        )
+            user_cancelled = False
+            try:
+                for chunk in stream:
+                    if should_cancel and should_cancel():
+                        user_cancelled = True
+                        break
+                    last_chunk = chunk
+                    u = _extract_chunk_usage(chunk)
+                    if u:
+                        last_usage = u
+                    if not chunk.choices:
+                        continue
+                    last_choice_chunk = chunk
+                    ch0 = chunk.choices[0]
+                    fr_chunk = getattr(ch0, "finish_reason", None)
+                    if fr_chunk:
+                        last_seen_finish_reason = fr_chunk
+                    delta = ch0.delta
+                    frag = _delta_content_text(delta)
+                    if frag:
+                        yield AgentContentDelta(text=frag)
+                    rtext = _delta_reasoning_text(delta)
+                    if rtext:
+                        yield AgentReasoningDelta(text=rtext)
+                    tcd = getattr(delta, "tool_calls", None)
+                    if tcd:
+                        for tc in tcd:
+                            idx = int(tc.index)
+                            tid = getattr(tc, "id", None) or None
+                            fn = getattr(tc, "function", None)
+                            nm = None
+                            arg_frag = None
+                            if fn is not None:
+                                nm = getattr(fn, "name", None) or None
+                                if not nm:
+                                    nm = None
+                                a = getattr(fn, "arguments", None) or None
+                                if a:
+                                    arg_frag = a if isinstance(a, str) else str(a)
+                            yield AgentToolCallDelta(
+                                index=idx,
+                                tool_call_id=tid,
+                                name=nm,
+                                arguments=arg_frag,
+                            )
 
-            finish_reason = last_seen_finish_reason
-            if finish_reason is None and last_choice_chunk and last_choice_chunk.choices:
-                fr = getattr(last_choice_chunk.choices[0], "finish_reason", None)
-                if fr:
-                    finish_reason = fr
+                finish_reason = last_seen_finish_reason
+                if finish_reason is None and last_choice_chunk and last_choice_chunk.choices:
+                    fr = getattr(last_choice_chunk.choices[0], "finish_reason", None)
+                    if fr:
+                        finish_reason = fr
 
-            self._last_usage = last_usage
-            self._last_response_metadata = {
-                "provider": type(self).__name__,
-                "model": model,
-                "response_id": getattr(last_chunk, "id", None) if last_chunk else None,
-                "request_id": getattr(last_chunk, "id", None) if last_chunk else None,
-                "latency_ms": int((time.perf_counter() - started) * 1000),
-                "retry_attempts": self._last_retry_attempts,
-                "token_usage": self._last_usage,
-            }
-            yield AgentMessageFinish(finish_reason=finish_reason, usage=last_usage)
+                self._last_usage = last_usage
+                self._last_response_metadata = {
+                    "provider": type(self).__name__,
+                    "model": model,
+                    "response_id": getattr(last_chunk, "id", None) if last_chunk else None,
+                    "request_id": getattr(last_chunk, "id", None) if last_chunk else None,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                    "retry_attempts": self._last_retry_attempts,
+                    "token_usage": self._last_usage,
+                }
+                if user_cancelled:
+                    yield AgentMessageFinish(finish_reason="cancelled", usage=last_usage)
+                else:
+                    yield AgentMessageFinish(finish_reason=finish_reason, usage=last_usage)
+            finally:
+                closer = getattr(stream, "close", None)
+                if callable(closer):
+                    try:
+                        closer()
+                    except Exception:
+                        pass
 
         return _gen()
 

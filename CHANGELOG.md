@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.18
+
+### Added
+
+- **`build_llm_provider_for_model`** (and **`infer_llm_markdown_backend_for_model`**, **`resolve_llm_markdown_backend`**) in `llm_markdown.providers.from_env` — pick `OpenAIProvider` vs `AnthropicProvider` from the model id, optional `LLM_MARKDOWN_PROVIDER` env (`openai` / `anthropic` / `claude`), and API keys from args or `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`.
+
+### Notes
+
+- Publish by tagging **`v0.3.18`** (must match `setup.py` / `llm_markdown.__version__`) and running the **Publish to PyPI** workflow (`docs/versioning.md`).
+
 ## 0.3.7
 
 ### Added

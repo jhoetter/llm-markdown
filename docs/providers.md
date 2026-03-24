@@ -27,6 +27,26 @@ Generation controls (for example `temperature`, `top_p`, `max_tokens`) can be pa
 
 Built-in providers normalize request failures to `ProviderError` for consistent handling.
 
+## Provider selection from model id (`build_llm_provider_for_model`)
+
+For apps that share one model env (e.g. `LLM_MARKDOWN_MODEL`) between OpenAI and Anthropic models, use:
+
+```python
+from llm_markdown.providers import build_llm_provider_for_model
+
+provider = build_llm_provider_for_model(
+    "claude-sonnet-4-6",
+    openai_api_key="...",  # optional; else OPENAI_API_KEY
+    anthropic_api_key="...",  # optional; else ANTHROPIC_API_KEY
+)
+```
+
+**Inference:** model ids containing `claude`, or starting with `anthropic.` / `anthropic/`, use **Anthropic**; otherwise **OpenAI**.
+
+**Override:** set `LLM_MARKDOWN_PROVIDER` to `openai`, `anthropic`, or `claude` to force the backend without changing the model string. Invalid values raise `ValueError`.
+
+**Keys:** the chosen backend must have a non-empty API key (from kwargs or env). Clear errors indicate which variable is missing.
+
 ## RouterProvider
 
 Use `RouterProvider` to provide ordered fallback and routing metadata across providers:

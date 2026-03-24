@@ -17,6 +17,11 @@ from .gemini import GeminiProvider
 from .openrouter import OpenRouterProvider
 from .base import LLMProvider, ProviderError
 from .router import RouterProvider
+from .from_env import (
+    build_llm_provider_for_model,
+    infer_llm_markdown_backend_for_model,
+    resolve_llm_markdown_backend,
+)
 
 
 def __getattr__(name: str):
@@ -51,4 +56,7 @@ __all__ = [
     "LLMProvider",
     "ProviderError",
     "openai_chat_tools_to_anthropic",
+    "build_llm_provider_for_model",
+    "infer_llm_markdown_backend_for_model",
+    "resolve_llm_markdown_backend",
 ]

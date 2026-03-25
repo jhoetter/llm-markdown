@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterator, Union
+
+from llm_markdown.providers.failure_info import ProviderFailure
 
 
 class ProviderError(RuntimeError):
@@ -15,11 +19,13 @@ class ProviderError(RuntimeError):
         *,
         original_error: Exception | None = None,
         retryable: bool = False,
+        failure: Union[ProviderFailure, None] = None,
     ):
         super().__init__(message)
         self.provider = provider
         self.original_error = original_error
         self.retryable = retryable
+        self.failure = failure
 
 
 @dataclass(slots=True)
@@ -82,13 +88,17 @@ class LLMProvider(ABC):
         return any(token in msg for token in retry_tokens)
 
     def _normalize_error(self, exc: Exception, *, retryable: bool) -> ProviderError:
+        from llm_markdown.providers.failure_info import infer_provider_failure
+
         provider_name = type(self).__name__
         message = f"{provider_name} request failed: {self._error_message(exc)}"
+        failure = infer_provider_failure(exc)
         return ProviderError(
             provider=provider_name,
             message=message,
             original_error=exc,
             retryable=retryable,
+            failure=failure,
         )
 
     def _call_with_retries(self, func: Callable[[], Any]) -> Any:

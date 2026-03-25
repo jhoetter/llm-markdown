@@ -36,8 +36,8 @@ def test_openrouter_provider_uses_openrouter_base_url(monkeypatch):
 
 def test_anthropic_provider_structured_tool_use(monkeypatch):
     class FakeAsyncClient:
-        def __init__(self, api_key):
-            self.api_key = api_key
+        def __init__(self, **kwargs):
+            self.api_key = kwargs.get("api_key")
 
     class FakeMessages:
         def create(self, **kwargs):
@@ -50,8 +50,8 @@ def test_anthropic_provider_structured_tool_use(monkeypatch):
             )
 
     class FakeClient:
-        def __init__(self, api_key):
-            self.api_key = api_key
+        def __init__(self, **kwargs):
+            self.api_key = kwargs.get("api_key")
             self.messages = FakeMessages()
 
     def fake_import(name):

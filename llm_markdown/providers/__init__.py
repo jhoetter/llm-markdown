@@ -16,6 +16,11 @@ from .anthropic import AnthropicProvider
 from .gemini import GeminiProvider
 from .openrouter import OpenRouterProvider
 from .base import LLMProvider, ProviderError
+from .failure_info import (
+    ProviderFailure,
+    ProviderFailureCategory,
+    infer_provider_failure,
+)
 from .router import RouterProvider
 from .from_env import (
     build_llm_provider_for_model,
@@ -55,6 +60,9 @@ __all__ = [
     "LangfuseWrapper",
     "LLMProvider",
     "ProviderError",
+    "ProviderFailure",
+    "ProviderFailureCategory",
+    "infer_provider_failure",
     "openai_chat_tools_to_anthropic",
     "build_llm_provider_for_model",
     "infer_llm_markdown_backend_for_model",

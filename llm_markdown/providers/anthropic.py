@@ -2,12 +2,14 @@ import asyncio
 import base64
 import importlib
 import json
+import sys
 import time
-from typing import AsyncIterator, Iterator, Union
+from typing import AsyncIterator, Iterator, Literal, Union
 
 from llm_markdown.agent_stream import (
     AgentContentDelta,
     AgentMessageFinish,
+    AgentRateLimitWait,
     AgentReasoningDelta,
     AgentStreamEvent,
     AgentToolCallDelta,
@@ -57,8 +59,10 @@ class AnthropicProvider(LLMProvider):
         self.api_key = api_key
         self.model = model
         self.max_tokens = max_tokens
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.async_client = anthropic.AsyncAnthropic(api_key=api_key)
+        # Disable SDK-level retries so 429/5xx surface here; we backoff, emit
+        # :class:`~llm_markdown.agent_stream.AgentRateLimitWait`, and retry (see ``stream_messages_events``).
+        self.client = anthropic.Anthropic(api_key=api_key, max_retries=0)
+        self.async_client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=0)
 
     @staticmethod
     def _convert_content(content):
@@ -296,7 +300,31 @@ class AnthropicProvider(LLMProvider):
             active_tool_idx: int | None = None
             saw_message_stop = False
             user_cancelled = False
-            with self._call_with_retries(_create_stream) as stream:
+            attempts = self.retry_config.max_retries + 1
+            stream_cm = None
+            stream = None
+            for attempt in range(attempts):
+                try:
+                    stream_cm = _create_stream()
+                    stream = stream_cm.__enter__()
+                    self._last_retry_attempts = attempt
+                    break
+                except Exception as exc:
+                    retryable = self._is_retryable_error(exc)
+                    if attempt >= attempts - 1 or not retryable:
+                        self._last_retry_attempts = attempt
+                        raise self._normalize_error(exc, retryable=retryable) from exc
+                    delay = self.retry_config.retry_backoff_seconds * (2**attempt)
+                    code = self._status_code(exc)
+                    rreason: Literal["rate_limit", "transient_error"] = (
+                        "rate_limit" if code == 429 else "transient_error"
+                    )
+                    yield AgentRateLimitWait(seconds=delay, reason=rreason)
+                    time.sleep(delay)
+
+            exc_info: tuple = (None, None, None)
+            try:
+                assert stream is not None
                 for chunk in stream:
                     if should_cancel and should_cancel():
                         user_cancelled = True
@@ -381,6 +409,12 @@ class AnthropicProvider(LLMProvider):
                     "latency_ms": int((time.perf_counter() - started) * 1000),
                     "retry_attempts": self._last_retry_attempts,
                 }
+            except BaseException:
+                exc_info = sys.exc_info()
+                raise
+            finally:
+                if stream_cm is not None:
+                    stream_cm.__exit__(*exc_info)
 
             if not saw_message_stop:
                 yield AgentMessageFinish(

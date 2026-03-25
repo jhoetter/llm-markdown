@@ -104,11 +104,15 @@ class RouterProvider(LLMProvider):
     def _normalize_exc(self, exc: Exception, provider: LLMProvider) -> ProviderError:
         if isinstance(exc, ProviderError):
             return exc
+        from llm_markdown.providers.failure_info import infer_provider_failure
+
+        pname = type(provider).__name__
         return ProviderError(
-            provider=type(provider).__name__,
-            message=f"{type(provider).__name__} request failed: {exc}",
+            provider=pname,
+            message=f"{pname} request failed: {exc}",
             original_error=exc,
             retryable=True,
+            failure=infer_provider_failure(exc),
         )
 
     def _capture_metadata(

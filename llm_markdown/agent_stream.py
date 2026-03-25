@@ -61,12 +61,25 @@ class AgentSegmentStart:
     kind: Literal["segment_start"] = "segment_start"
 
 
+@dataclass(frozen=True, slots=True)
+class AgentRateLimitWait:
+    """Provider hit a retryable limit or transient error; consumer may show a short wait notice.
+
+    Emitted **before** the provider sleeps and retries opening the stream (e.g. HTTP 429).
+    """
+
+    seconds: float
+    reason: Literal["rate_limit", "transient_error"] = "transient_error"
+    kind: Literal["provider_wait"] = "provider_wait"
+
+
 AgentStreamEvent = Union[
     AgentContentDelta,
     AgentReasoningDelta,
     AgentToolCallDelta,
     AgentMessageFinish,
     AgentSegmentStart,
+    AgentRateLimitWait,
 ]
 
 
@@ -97,6 +110,7 @@ __all__ = [
     "AgentToolCallDelta",
     "AgentMessageFinish",
     "AgentSegmentStart",
+    "AgentRateLimitWait",
     "AgentStreamEvent",
     "openai_chat_tools_to_anthropic",
 ]
